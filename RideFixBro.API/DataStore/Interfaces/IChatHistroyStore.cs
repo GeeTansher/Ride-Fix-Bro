@@ -5,6 +5,7 @@ namespace RideFixBro.API.DataStore.Interfaces
 	public interface IChatHistoryStore
 	{
 		List<IMessage> GetHistory(string sessionId);
-		void SaveHistory(string sessionId, List<IMessage> history);
+		Task<T> UpdateHistoryAsync<T>(string sessionId, Func<List<IMessage>, Task<T>> update,
+			CancellationToken cancellationToken = default);
 	}
 }

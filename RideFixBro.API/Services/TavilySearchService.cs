@@ -11,10 +11,11 @@ namespace RideFixBro.API.Services
 		private readonly string _apiKey;
 		private readonly HttpClient _httpClient;
 
-		public TavilySearchService(string apiKey)
+		public TavilySearchService(IConfiguration config, HttpClient httpClient)
 		{
-			_apiKey = apiKey;
-			_httpClient = new HttpClient();
+			_apiKey = config["API_Keys:Tavily_Api_key"]
+				?? throw new InvalidOperationException("Tavily API key is missing.");
+			_httpClient = httpClient;
 		}
 
 		// Ye [Function] tag AutoGen ko batata hai ki AI isko use kar sakta hai
@@ -22,49 +23,34 @@ namespace RideFixBro.API.Services
 		[Description("Internet par live search karne ke liye is tool ka use karein. Ye latest data, prices, aur market info layega.")]
 		public async Task<string> SearchInternetAsync([Description("Search query jise internet par dhoondhna hai, jaise 'latest riding jacket price'")] string query)
 		{
-			try
+			ArgumentException.ThrowIfNullOrWhiteSpace(query);
+			var requestBody = new
 			{
-				// Tavily ko LLM-friendly request bhej rahe hain
-				var requestBody = new
-				{
-					api_key = _apiKey,
-					query = query,
-					search_depth = "basic",
-					include_answer = true, // Tavily direct answer generate karke dega
-					max_results = 3
-				};
+				api_key = _apiKey,
+				query = query,
+				search_depth = "basic",
+				include_answer = true,
+				max_results = 3
+			};
 
-				var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+			using var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+			using var response = await _httpClient.PostAsync("https://api.tavily.com/search", content);
+			response.EnsureSuccessStatusCode();
 
-				// Note: Timeout 10 sec rakha hai taaki API slow na ho
-				_httpClient.Timeout = TimeSpan.FromSeconds(10);
-				var response = await _httpClient.PostAsync("https://api.tavily.com/search", content);
+			var resultStr = await response.Content.ReadAsStringAsync();
+			using var doc = JsonDocument.Parse(resultStr);
 
-				if (!response.IsSuccessStatusCode)
-				{
-					return "Error: Internet search fail ho gaya. Apni basic knowledge se answer de de bhai.";
-				}
-
-				var resultStr = await response.Content.ReadAsStringAsync();
-				using var doc = JsonDocument.Parse(resultStr);
-
-				// Tavily ek direct 'answer' deta hai LLM ke liye, hum wahi uthayenge
-				if (doc.RootElement.TryGetProperty("answer", out var answerElement) &&
-					answerElement.ValueKind == JsonValueKind.String)
-				{
-					string? answer = answerElement.GetString();
-					if (!string.IsNullOrEmpty(answer))
-						return answer;
-				}
-
-				// Agar direct answer nahi mila toh thoda raw JSON de denge
-				return resultStr;
-			}
-			catch(Exception ex)
+			if (doc.RootElement.TryGetProperty("answer", out var answerElement) &&
+				answerElement.ValueKind == JsonValueKind.String)
 			{
-				Console.WriteLine("Error in Tavily Search Service: " + ex.ToString());
-				throw new Exception($"Error Message: {ex.Message} \n Error Inner Exception: {ex.InnerException}");
+				var answer = answerElement.GetString();
+				if (!string.IsNullOrWhiteSpace(answer))
+				{
+					return answer;
+				}
 			}
+
+			return resultStr;
 		}
 	}
 }

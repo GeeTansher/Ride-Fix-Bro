@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="RideFixBro.API.csproj" />
+  <Project Path="../RideFixBro.API.Tests/RideFixBro.API.Tests.csproj" />
 </Solution>

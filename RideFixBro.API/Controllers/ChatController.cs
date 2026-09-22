@@ -42,8 +42,14 @@ namespace RideFixBro.API.Controllers
 		}
 
 		[HttpPost("ask")]
-		public async Task<IActionResult> AskBro([FromBody] ChatRequest request)
+		// Bhai, ye token JSON se nahi aata; ASP.NET request abort hone ka signal deta hai.
+		public async Task<IActionResult> AskBro([FromBody] ChatRequest request, CancellationToken cancellationToken)
 		{
+			if (string.IsNullOrWhiteSpace(request.SessionId))
+			{
+				return BadRequest(new { Error = "A nonempty SessionId is required." });
+			}
+
 			// Agar user ne khali message bhej diya
 			if (string.IsNullOrWhiteSpace(request.Message))
 			{
@@ -53,8 +59,13 @@ namespace RideFixBro.API.Controllers
 			try
 			{
 				// AiManagerService ko message pass kiya
-				var response = await _aiManager.AskMechanicBro(request.SessionId, request.Message, request.ImageData);
+				var response = await _aiManager.AskMechanicBro(request.SessionId, request.Message, request.ImageData, cancellationToken);
 				return Ok(new { Reply = response });
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				// Request cancel hui hai; ise neeche wale catch mein server crash mat bana.
+				throw;
 			}
 			catch (Exception ex)
 			{

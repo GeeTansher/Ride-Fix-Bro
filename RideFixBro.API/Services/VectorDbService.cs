@@ -19,6 +19,12 @@ namespace RideFixBro.API.Services
 		private readonly EmbeddingClient _embeddingClient;
 		private readonly string _collectionName = "X440_Manual"; // DB ka naam
 
+		internal VectorDbService(QdrantClient qdrantClient, EmbeddingClient embeddingClient)
+		{
+			_qdrantClient = qdrantClient;
+			_embeddingClient = embeddingClient;
+		}
+
 		public VectorDbService(IConfiguration config)
 		{
 			var qdrantEndpoint = config["Qdrant_Vector_DB:Cluster_Endpoint"];
@@ -132,38 +138,29 @@ namespace RideFixBro.API.Services
 		public async Task<string> SearchManualAsync(
 			[Description("Search query jo DB mein dhoondhni hai")] string userQuery)
 		{
-			try
+			ArgumentException.ThrowIfNullOrWhiteSpace(userQuery);
+			var embeddingResponse = await _embeddingClient.GenerateEmbeddingAsync(userQuery);
+			var queryVector = embeddingResponse.Value.ToFloats().ToArray();
+			var searchResults = await _qdrantClient.QueryAsync(
+				collectionName: _collectionName,
+				query: queryVector,
+				limit: 3
+			);
+
+			var contextText = new StringBuilder();
+			foreach (var result in searchResults)
 			{
-				// 1. User ke sawal ka "Meaning" (Vector) nikaalo
-				var embeddingResponse = await _embeddingClient.GenerateEmbeddingAsync(userQuery);
-				var queryVector = embeddingResponse.Value.ToFloats().ToArray();
-
-				// 2. Qdrant mein search maaro (Top 3 most relevant results layega)
-				var searchResults = await _qdrantClient.QueryAsync(
-					collectionName: _collectionName,
-					query: queryVector,
-					limit: 3
-				);
-
-				// 3. Jo results aaye, unka text combine kar lo
-				var contextText = new StringBuilder();
-				foreach (var result in searchResults)
+				if (result.Payload.TryGetValue("text", out var textValue) &&
+					!string.IsNullOrWhiteSpace(textValue.StringValue))
 				{
-					// Payload se text nikaal rahe hain jo humne upload time daala tha
-					if (result.Payload.TryGetValue("text", out var textValue))
-					{
-						contextText.AppendLine(textValue.StringValue);
-						contextText.AppendLine("---"); // Separator
-					}
+					contextText.AppendLine(textValue.StringValue);
+					contextText.AppendLine("---");
 				}
+			}
 
-				return contextText.ToString();
-			}
-			catch (Exception ex)
-			{
-				Console.WriteLine($"Search mein panga: {ex.Message}");
-				return ""; // Agar kuch phata toh khali string bhej do
-			}
+			return contextText.Length > 0
+				? contextText.ToString()
+				: "No relevant manual passages were found. Do not present general advice as a verified manual specification.";
 		}
 
 		// Helper Function: Text ko words ke hisaab se todne ke liye

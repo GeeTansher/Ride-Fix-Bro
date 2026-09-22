@@ -6,19 +6,41 @@ namespace RideFixBro.API.DataStore
 {
 	public class InMemoryChatStore : IChatHistoryStore
 	{
-		// Ye tera temporary RAM wala DB hai
-		// Thread-safe dictionary taaki multiple log ek sath chat karein toh crash na ho
-		private readonly ConcurrentDictionary<string, List<IMessage>> _store = new();
+		private readonly ConcurrentDictionary<string, SessionHistory> _store = new();
 
 		public List<IMessage> GetHistory(string sessionId)
 		{
-			// Agar history hai toh la, nahi toh khali list de
-			return _store.TryGetValue(sessionId, out var history) ? history : [];
+			ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+			return _store.TryGetValue(sessionId, out var session) ? session.Messages.ToList() : [];
 		}
 
-		public void SaveHistory(string sessionId, List<IMessage> history)
+		public async Task<T> UpdateHistoryAsync<T>(string sessionId, Func<List<IMessage>, Task<T>> update,
+			CancellationToken cancellationToken = default)
 		{
-			_store[sessionId] = history;
+			ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+			var session = _store.GetOrAdd(sessionId, _ => new SessionHistory());
+			// Ek session mein ek turn chale; doosre session wale bhai ko wait nahi karwana.
+			await session.Gate.WaitAsync(cancellationToken);
+			try
+			{
+				// List ki copy pe kaam kar: beech mein error aaye toh saved history ko chhedna nahi.
+				// Message objects shared hain, isliye purane tool calls ko mutate nahi karte.
+				var history = session.Messages.ToList();
+				var result = await update(history);
+				cancellationToken.ThrowIfCancellationRequested();
+				session.Messages = history.ToArray();
+				return result;
+			}
+			finally
+			{
+				session.Gate.Release();
+			}
+		}
+
+		private sealed class SessionHistory
+		{
+			public SemaphoreSlim Gate { get; } = new(1, 1);
+			public volatile IMessage[] Messages = [];
 		}
 	}
 }

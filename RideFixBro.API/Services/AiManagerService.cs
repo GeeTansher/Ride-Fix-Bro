@@ -1,5 +1,4 @@
-﻿using AutoGen.Core;
-using Microsoft.SemanticKernel.ChatCompletion;
+using AutoGen.Core;
 using RideFixBro.API.Agents;
 using RideFixBro.API.DataStore.Interfaces;
 
@@ -7,162 +6,114 @@ namespace RideFixBro.API.Services
 {
 	public class AiManagerService
 	{
-		private readonly string _geminiApiKey;
-		private readonly string _tavilyApiKey;
-		private readonly VectorDbService _vectorDb; // Vector DB ka reference
+		private readonly IAgent _agent;
+		private readonly IChatHistoryStore _chatHistoryStore;
+		private readonly ILogger<AiManagerService> _logger;
+		private readonly int _maxToolRounds;
 
-		private readonly IChatHistoryStore chatHistoryStore;
-
-		// Constructor mein VectorDbService inject ki
-		public AiManagerService(IConfiguration config, VectorDbService vectorDb, IChatHistoryStore chatStore)
+		public AiManagerService(IAgent agent, IChatHistoryStore chatStore,
+			IConfiguration config, ILogger<AiManagerService> logger)
 		{
-			_geminiApiKey = config["API_Keys:Gemini_Api_key"] ?? throw new ArgumentNullException("Bhai, appsettings mein Gemini API Key nahi mil rahi!");
-			_tavilyApiKey = config["API_Keys:Tavily_Api_key"] ?? throw new ArgumentNullException("Bhai, appsettings mein Tavily API Key nahi mil rahi!");
-			_vectorDb = vectorDb;
-			chatHistoryStore = chatStore;
+			_agent = agent;
+			_chatHistoryStore = chatStore;
+			_logger = logger;
+			_maxToolRounds = config.GetValue("Chat:MaxToolRounds", 5);
+			if (_maxToolRounds <= 0)
+			{
+				throw new ArgumentOutOfRangeException(nameof(config), "Chat:MaxToolRounds must be positive.");
+			}
 		}
 
-		public async Task<string> AskMechanicBro(string sessionId, string userMessage, string? base64Image = null)
+		public async Task<string> AskMechanicBro(string sessionId, string userMessage,
+			string? base64Image = null, CancellationToken cancellationToken = default)
 		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+			ArgumentException.ThrowIfNullOrWhiteSpace(userMessage);
+
+			IMessage messageToSend = new TextMessage(Role.User, userMessage);
+			if (!string.IsNullOrEmpty(base64Image))
+			{
+				var dataUri = base64Image.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)
+					? base64Image
+					: $"data:image/jpeg;base64,{base64Image}";
+				messageToSend = new MultiModalMessage(Role.User,
+				[
+					new TextMessage(Role.User, userMessage),
+					new ImageMessage(Role.User, dataUri)
+				]);
+			}
+
 			try
 			{
-				// Agent ko bula aur prompt de de
-				var broAgent = MechanicBroAgent.Create(_geminiApiKey, _tavilyApiKey, _vectorDb);
-				IMessage messageToSend;
-
-				// Agar photo aayi hai, toh MultiModal Message banayenge
-				if (!string.IsNullOrEmpty(base64Image))
+				// Working history pe turn chala; final answer mila tabhi store isse save karega.
+				return await _chatHistoryStore.UpdateHistoryAsync(sessionId, async history =>
 				{
-					// Format fix kar rahe hain incase app se galat aaye
-					string cleanBase64 = base64Image.Replace("data:image/jpeg;base64,", "").Replace("data:image/png;base64,", "");
-					string dataUri = $"data:image/jpeg;base64,{cleanBase64}";
-
-					// Image aur Text dono ek saath bhej rahe hain
-					messageToSend = new MultiModalMessage(Role.User,
-					[
-						new TextMessage(Role.User, userMessage),
-						new ImageMessage(Role.User, dataUri)
-					]);
-				}
-				else
-				{
-					// Warna normal text message
-					messageToSend = new TextMessage(Role.User, userMessage);
-				}
-
-				// 2. Memory se history nikali
-				var chatHistory = chatHistoryStore.GetHistory(sessionId);
-				chatHistory.Add(messageToSend);
-
-				// 3. Seedha SendAsync maro! Middleware khud sabhi tools (Tavily & Manual) 
-				// ko execute karke final Hinglish answer laake dega. No manual loops needed!
-				var reply = await broAgent.GenerateReplyAsync(chatHistory);
-
-				chatHistory.Add(reply);
-				//chatHistoryStore.SaveHistory(sessionId, chatHistory);
-				// History save karne se pehle ye check laga de bhai:
-				var cleanHistory = chatHistory.Where(m =>
-				{
-					// Agar ToolCallMessage hai aur uska result null hai, toh usko uda do
-					if (m is ToolCallResultMessage toolMsg)
+					history.Add(messageToSend);
+					for (var round = 0; ; round++)
 					{
-						// Check if any tool result is null or empty
-						return true;
+						cancellationToken.ThrowIfCancellationRequested();
+						var reply = await _agent.GenerateReplyAsync(history,
+							new MechanicReplyOptions { ExecuteTools = round < _maxToolRounds },
+							cancellationToken);
+
+						// Tool ka result user ka final answer nahi hai; woh Gemini se alag se aayega.
+						if (reply is TextMessage text && text.Role == Role.Assistant &&
+							!string.IsNullOrWhiteSpace(text.Content))
+						{
+							history.Add(reply);
+							return text.Content;
+						}
+
+						if (round >= _maxToolRounds)
+						{
+							throw new InvalidOperationException(
+								$"Tool-calling limit of {_maxToolRounds} rounds reached. Try a narrower question.");
+						}
+
+						if (reply is not AggregateMessage<ToolCallMessage, ToolCallResultMessage> toolReply)
+						{
+							throw new InvalidOperationException(
+								$"Expected a completed tool exchange or an assistant answer, but received {reply.GetType().Name}.");
+						}
+
+						ValidateToolExchange(toolReply);
+						// Request + results saath rakh; agli iteration mein Gemini inhe padhke aage bolega.
+						history.Add(toolReply);
 					}
-					return true;
-				}).ToList();
-
-				chatHistoryStore.SaveHistory(sessionId, cleanHistory);
-
-				return reply.GetContent();
-				//// 1. Apni "Tool Registry" bana le (Yahan tu 100 tools bhi add kar sakta hai bina if-else ke)
-				//var toolRegistry = new Dictionary<string, Func<string, Task<string>>>
-				//{
-				//	{
-				//		"SearchInternetAsync", async (jsonArgs) =>
-				//		{
-				//			var args = System.Text.Json.JsonDocument.Parse(jsonArgs);
-				//			var query = args.RootElement.GetProperty("query").GetString() ?? "";
-				//			var tavilyService = new TavilySearchService(_tavilyApiKey);
-				//			return await tavilyService.SearchInternetAsync(query);
-				//		}
-				//	},
-				//	{
-				//		"SearchManualAsync", async (jsonArgs) =>
-				//		{
-				//			var args = System.Text.Json.JsonDocument.Parse(jsonArgs);
-				//			var query = args.RootElement.GetProperty("userQuery").GetString();
-				//			// LLM ne jo smart query banayi hai, usse DB search maar!
-				//			return await _vectorDb.SearchManualAsync(query);
-				//		}
-				//	}
-				//};
-
-				//// 2. Chat history maintain kar
-				//// Database (Memory) se pichli baatein nikal!
-				//var chatHistory = chatHistoryStore.GetHistory(sessionId);
-
-				//// user ka message add kar
-				//chatHistory.Add(messageToSend);
-
-				//var reply = await broAgent.GenerateReplyAsync(chatHistory);
-				//chatHistory.Add(reply);
-
-				//// 3. Agar Gemini ne koi Tool maanga hai (kitne bhi tools ho sakte hain)
-				//if (reply is ToolCallMessage toolCallMsg)
-				//{
-				//	// Hum history mein purana message replace karke naya daalenge jisme Content = "" (khali string) ho.
-				//	var safeToolCallMsg = new ToolCallMessage(toolCallMsg.ToolCalls, toolCallMsg.From) { Content = "" };
-				//	chatHistory[chatHistory.Count - 1] = safeToolCallMsg; // Last message replace kar diya
-
-				//	var toolResultsList = new List<ToolCall>();       // Naya list banayenge saare results ikkathe karne ke liye
-
-				//	// AutoGen ek saath multiple tools bhi maang sakta hai, isliye hum loop lagayenge
-				//	foreach (var toolCall in toolCallMsg.ToolCalls)
-				//	{
-				//		string toolResultText = "";
-
-				//		// Check kar ki Gemini ne jo tool maanga, wo humari Registry mein hai ya nahi
-				//		if (toolRegistry.TryGetValue(toolCall.FunctionName, out var executeToolLogic))
-				//		{
-				//			// Tool execute kar bina kisi if-else ke!
-				//			toolResultText = await executeToolLogic(toolCall.FunctionArguments);
-				//		}
-				//		else
-				//		{
-				//			toolResultText = "Error: Bhai ye tool toh mere paas hai hi nahi!";
-				//		}
-
-				//		// AAG KA GOLA: Purane toolCall ko mutate nahi karna hai!
-				//		// Ek naya ToolCall object bana sirf result ke liye taaki purana message corrupt na ho.
-
-				//		//// Gemini strict hai, usko plain text nahi, JSON chahiye tool result mein!
-				//		//var safeJsonResult = System.Text.Json.JsonSerializer.Serialize(new { result = toolResultText });
-
-				//		var completedToolCall = new ToolCall(toolCall.FunctionName, toolCall.FunctionArguments)
-				//		{
-				//			ToolCallId = toolCall.ToolCallId, // ID match karna bohot zaroori hai
-				//			Result = toolResultText
-				//		};
-
-				//		toolResultsList.Add(completedToolCall);
-				//	}
-
-				//	// Saare tools ke results ko EK SAATH ek single message mein pack kar (Loop ke bahar)
-				//	var resultMsg = new ToolCallResultMessage(toolResultsList);
-				//	chatHistory.Add(resultMsg);
-
-				//	// 4. Sab tools chalne ke baad LLM ko bol "Bhai ab tu padh aur final answer de"
-				//	reply = await broAgent.GenerateReplyAsync(chatHistory);
-				//	chatHistory.Add(reply);
-				//}
-				//chatHistoryStore.SaveHistory(sessionId, chatHistory);
-				//return reply.GetContent();
+				}, cancellationToken);
 			}
-			catch(Exception ex)
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{
-				Console.WriteLine("Error in Ai Manager Service: " + ex.ToString());
-				throw new Exception($"Error Message: {ex.Message} \n Error Inner Exception: {ex.InnerException}");
+				throw;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Mechanic chat failed; the incomplete turn was not saved.");
+				throw;
+			}
+		}
+
+		// Har call ID ka exactly ek matching result chahiye; adhura bundle Gemini ko mat bhej.
+		private static void ValidateToolExchange(AggregateMessage<ToolCallMessage, ToolCallResultMessage> exchange)
+		{
+			var calls = exchange.Message1.ToolCalls.ToList();
+			var results = exchange.Message2.ToolCalls.ToList();
+			if (calls.Count == 0 || calls.Count != results.Count ||
+				calls.Any(call => string.IsNullOrWhiteSpace(call.ToolCallId)) ||
+				calls.Select(call => call.ToolCallId).Distinct(StringComparer.Ordinal).Count() != calls.Count)
+			{
+				throw new InvalidOperationException("The tool exchange has missing or duplicate call IDs or results.");
+			}
+
+			foreach (var call in calls)
+			{
+				var matches = results.Where(result => result.ToolCallId == call.ToolCallId).ToList();
+				if (matches.Count != 1 || matches[0].FunctionName != call.FunctionName ||
+					matches[0].FunctionArguments != call.FunctionArguments ||
+					string.IsNullOrWhiteSpace(matches[0].Result))
+				{
+					throw new InvalidOperationException($"Tool '{call.FunctionName}' did not return a matching, nonempty result.");
+				}
 			}
 		}
 	}

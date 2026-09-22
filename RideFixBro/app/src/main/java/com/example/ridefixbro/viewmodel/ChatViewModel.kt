@@ -8,11 +8,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 // Ye data class UI pe message dikhane ke kaam aayegi
 data class ChatMessage(val text: String, val isUser: Boolean)
 
 class ChatViewModel : ViewModel() {
+
+    private val sessionId = UUID.randomUUID().toString()
 
     // Jo messages hum UI (Compose) ko dikhayenge
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -33,7 +36,7 @@ class ChatViewModel : ViewModel() {
         // 2. Background thread mein API call maro (taaki UI hang na ho)
         viewModelScope.launch {
             try {
-                val request = ChatRequest(message = text, imageData = base64Image)
+                val request = ChatRequest(sessionId = sessionId, message = text, imageData = base64Image)
 
                 // Tera dakiya gaya server pe... (yahan tere interface ka naam lagana agar alag ho)
                 val response = RideFixBroClient.api.askMechanicBro(request)

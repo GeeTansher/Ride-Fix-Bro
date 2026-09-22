@@ -1,5 +1,9 @@
+using AutoGen.Core;
+using OpenAI.Chat;
+using RideFixBro.API.Agents;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
+using RideFixBro.API.Services;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,6 +16,18 @@ builder.Services.AddControllers();
 builder.Services.AddScoped<RideFixBro.API.Services.AiManagerService>();
 builder.Services.AddSingleton<RideFixBro.API.Services.VectorDbService>();
 builder.Services.AddSingleton<IChatHistoryStore, InMemoryChatStore>();
+builder.Services.AddSingleton<ChatClient>(services =>
+{
+	var config = services.GetRequiredService<IConfiguration>();
+	var apiKey = config["API_Keys:Gemini_Api_key"]
+		?? throw new InvalidOperationException("Gemini API key is missing.");
+	return OpenAIClientBuilder.Create(apiKey).GetChatClient("gemini-3.1-flash-lite");
+});
+builder.Services.AddHttpClient<TavilySearchService>(client => client.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddScoped<IAgent>(services => MechanicBroAgent.Create(
+	services.GetRequiredService<ChatClient>(),
+	services.GetRequiredService<TavilySearchService>(),
+	services.GetRequiredService<VectorDbService>()));
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
