@@ -1,35 +1,50 @@
-# Ride-Fix-Bro
+# 🏍️ RideFix Bro - The Agentic AI Motorcycle Mechanic
 
-## Chat tool execution
+> "Kyunki har problem ka solution garage mein nahi milta, kabhi kabhi cloud mein bhi hota hai!"
 
-The API uses AutoGen.OpenAI with Google's OpenAI-compatible endpoint. Both search
-tools register their generated contracts **and** execution wrappers. Successful
-results are sent as JSON strings with a `result` property.
+RideFix Bro is a high-performance, multi-agent AI assistant designed to diagnose motorcycle issues, search technical manuals via RAG, and fetch live market data. Built with a robust **.NET 10 API** backend and a sleek **Kotlin Jetpack Compose** Android frontend.
 
-The Gemini message connector retains the SDK's original tool-call objects,
-including `extra_content.google.thought_signature`. Do not replace them with
-new tool calls containing only the name, arguments, and ID: that loses provider
-metadata needed by subsequent requests.
+## 🚀 The Tech Stack
 
-Each turn runs until an assistant answer is received. `Chat:MaxToolRounds` in
-`RideFixBro.API\appsettings.json` defaults to **5**; override it with the
-`Chat__MaxToolRounds` environment variable if needed. Multiple tools requested
-in one assistant message count as one round. After the fifth round, the model
-can produce a final answer, but no sixth batch of tools is executed.
+**Backend (The Brains):**
+* **Framework:** .NET 10 Web API
+* **AI Orchestration:** Microsoft AutoGen (C#)
+* **LLM Engine:** Gemini 3.1 Flash Lite (Routed via OpenAI Proxy for protobuf compatibility)
+* **Vector Database:** Qdrant Cloud (3072-dimension embeddings for Gemini)
+* **Live Search Agent:** Tavily Search API
+* **Memory:** Thread-safe In-Memory Session Store (SemaphoreSlim managed)
+* **Deployment:** Azure App Service (F1 Tier)
+* **API Documentation:** Scalar UI (`Scalar.AspNetCore`)
 
-History is committed only after a nonempty final answer. Tool errors, provider
-errors, cancellations, and exhausted budgets leave the saved history unchanged.
-Requests for the same nonempty `SessionId` are serialized; different sessions
-can proceed independently. Tool failures are logged and surfaced as errors,
-not saved as empty results. A successful manual lookup with no matches returns
-an explicit no-match message.
+**Frontend (The Face):**
+* **Framework:** Kotlin + Jetpack Compose (Modern Android UI)
+* **Architecture:** MVVM (Model-View-ViewModel)
+* **Networking:** Retrofit with OkHttp (Configured with 60s timeouts for Azure cold-starts)
+* **Features:** Multimodal Vision (Camera/Gallery uploads), Markdown rendering.
 
-The Android chat ViewModel creates one session ID and sends it with every
-message in that conversation. Scalar/API callers must also supply a nonempty
-`sessionId` and reuse it for follow-up messages.
+## 🧠 How It Works (The Architecture)
 
-History is still in-memory and is lost on restart. Restart the existing API
-process once when applying this fix to discard any previously corrupted sessions.
+RideFix Bro isn't just a simple chatbot. It uses a **Multi-Agent Orchestration Loop**:
+1. **Dynamic Tool Routing:** The LLM decides whether to search the internet (for latest gear prices/reviews) or query the Vector DB (for specific bike torque specs and error codes).
+2. **Custom Message Translation:** A custom `GeminiMessageConnector` middleware intercepts and translates AutoGen SDK messages into Gemini-compatible structures, preventing `400 Bad Request` proxy sequence errors.
+3. **Thread-Safe Memory:** Uses a `ConcurrentDictionary` and `SemaphoreSlim` to maintain perfect chat history sequences per user session without race conditions.
+
+## 🛠️ Quick Setup (Local Development)
+
+### Prerequisites
+* .NET 10 SDK
+* Qdrant Cloud Account
+* Gemini API Key & Tavily API Key
+* Android Studio
+
+### Backend Setup
+1. Clone the repo.
+2. Add your secrets using .NET User Secrets:
+   ```bash
+   dotnet user-secrets set "API_Keys:Gemini_Api_key" "YOUR_KEY"
+   dotnet user-secrets set "API_Keys:Tavily_Api_key" "YOUR_KEY"
+   dotnet user-secrets set "Qdrant_Vector_DB:Cluster_Endpoint" "YOUR_URL"
+   dotnet user-secrets set "Qdrant_Vector_DB:API_Key" "YOUR_KEY"
 
 ## Regression tests
 
