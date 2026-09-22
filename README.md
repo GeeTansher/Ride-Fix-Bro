@@ -65,3 +65,28 @@ SDK setup:
 Set-Location .\RideFixBro
 .\gradlew.bat :app:testDebugUnitTest --tests com.example.ridefixbro.ChatRequestTest
 ```
+
+
+1.  Run the API: dotnet run. Visit /scalar for the UI.
+    
+
+### Frontend Setup
+
+1.  Open the Android project in Android Studio.
+    
+2.  Update the RetrofitClient base URL to point to your local machine (e.g., http://10.0.2.2:5000 for emulator).
+    
+3.  Build and run!
+    
+
+🛣️ Future Roadmap
+------------------
+
+*   \[ \] Migrate InMemoryChatStore to Entity Framework (SQL Server) for persistent user garages.
+    
+*   \[ \] Cloud-based PDF dynamic chunking and upload endpoints for multiple bike manuals.
+    
+*   \[ \] Voice input/output integration.
+    
+
+_Built with ❤️ and a lot of caffeine by \[Geetansh Verma / Your GitHub Username\]_
