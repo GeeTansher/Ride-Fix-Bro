@@ -1,12 +1,8 @@
 ﻿using AutoGen.Core;
-using Microsoft.AspNetCore.DataProtection.KeyManagement;
-using Microsoft.Extensions.Configuration;
-using OpenAI;
-using OpenAI.Embeddings; // Embeddings ke liye
+using OpenAI.Embeddings;
 using Qdrant.Client;
 using Qdrant.Client.Grpc;
 using RideFixBro.API.Agents;
-using System.ClientModel;
 using System.ComponentModel;
 using System.Text;
 using UglyToad.PdfPig;

@@ -2,7 +2,96 @@
 
 > "Kyunki har problem ka solution garage mein nahi milta, kabhi kabhi cloud mein bhi hota hai!"
 
-RideFix Bro is a high-performance, multi-agent AI assistant designed to diagnose motorcycle issues, search technical manuals via RAG, and fetch live market data. Built with a robust **.NET 10 API** backend and a sleek **Kotlin Jetpack Compose** Android frontend.
+RideFix Bro is an AI motorcycle assistant that searches technical manuals via RAG
+and retrieves current information through web search. It uses a **.NET 10 API**
+backend and a **Kotlin Jetpack Compose** Android frontend.
+
+## Demo limits and disabled uploads
+
+The application currently targets a controlled demonstration, not a publicly
+authenticated service. Limits are configured in the `Chat` section of
+`RideFixBro.API\appsettings.json`. Override these values through Azure App Service
+settings using double underscores, for example `Chat__RequestsPerMinute`.
+Restart the application after changing the configuration. Zero or negative
+limits cause startup validation to fail rather than silently disabling controls.
+
+| Setting | Default |
+|---|---:|
+| `MaxMessageCharacters` | 2,000 characters |
+| `MaxSessionIdCharacters` | 128 characters |
+| `MaxImageBytes` | 2,097,152 bytes (2 MiB), one JPEG/PNG |
+| `MaxImagePixels` | 16,777,216 pixels, checked before full image decoding |
+| `MaxRequestBodyBytes` | 3,145,728 bytes (3 MiB), including Base64/JSON |
+| `RequestsPerMinute` | 5 per fixed one-minute window, shared by this backend instance |
+| `MaxConcurrentRequests` | 1 active chat operation per instance, no waiting queue |
+| `MaxHistoryTurns` | 10 completed turns, including the new successful turn |
+| `MaxToolRounds` | 5 tool-calling rounds per user message |
+| `MaxToolCallsPerRequest` | 6 individual tool executions across all rounds |
+
+Message and image limits are enforced server-side. JPEG and PNG content is
+decoded and validated rather than relying solely on the declared MIME type.
+The request-rate and request-body limits apply only to `POST /api/Chat/ask`.
+`Program.cs` registers the named rate policy and ASP.NET Core's built-in
+`RequestSizeLimitAttribute`; registration does not apply them globally.
+The Ask action explicitly selects these controls:
+
+```csharp
+[EnableRateLimiting("chat")]
+[ServiceFilter(typeof(RequestSizeLimitAttribute))]
+```
+
+The size filter uses the configured `MaxRequestBodyBytes` value and the web
+server enforces it even when `Content-Length` is absent. No custom body-buffering
+filter is required. Other controller actions do not inherit these chat-specific
+limits unless they explicitly opt in; normal web-server limits still apply.
+Endpoints opting into the same `"chat"` policy would share its rate bucket.
+
+The Ask action also uses a shared `SemaphoreSlim` to admit chat processing only
+when a slot is available, releasing the slot in `finally`. Unrelated actions do
+not acquire these slots. Ask requests rejected as busy still count toward the
+one-minute request allowance. The application-wide 413 handler only formats
+size errors; it does not impose a chat-size limit on other APIs.
+
+A round containing both a manual search and an internet search counts as
+**one round and two tool calls**. A batch that exceeds the remaining tool budget
+is rejected before execution. Once the budget is exhausted, the model may still
+produce a final answer, but no additional tools can execute.
+Model requests and embedding calls are separate from this tool-execution count;
+these limits are not a hard token or billing cap.
+
+History retention removes complete older turns rather than individual tool
+messages. Retained tool calls preserve their original Gemini metadata. Failed
+turns and their tentative history trimming are not committed. The Android client
+may still display older messages, while model context is limited to the
+configured retention window.
+
+| HTTP status | Meaning |
+|---|---|
+| `400` | Invalid/too-long message, invalid session ID, or invalid image |
+| `413` | Request body, image bytes, or image dimensions exceed the limit |
+| `429` | Request-rate or concurrency limit; no request queue is created |
+| `422` | The question exceeded its tool-round or tool-call budget |
+| `500` | Unexpected/provider failure; internal details stay in server logs |
+
+The following routes have been removed and return **404**:
+
+```text
+POST /api/Chat/upload-dummy-manual
+POST /api/Chat/upload-pdf-manual
+```
+
+Existing Qdrant manuals remain searchable. Ingestion service methods are retained
+for future administrative functionality, but HTTP upload routes, administrator
+authentication, administrator roles, and an upload interface are not currently
+enabled. Reintroducing uploads requires server-side authentication and
+authorization; client-side visibility or an `isAdmin` flag does not grant access.
+
+Limits are process-local: they reset on restart and are not shared across
+instances. Sessions are stored in memory, and the turn limit applies per
+conversation rather than to the total number of sessions. These controls do
+**not** make the chat API private. Configure network access restrictions
+separately; this implementation does not modify Azure access restrictions,
+Key Vault configuration, or authentication settings.
 
 ## 🚀 The Tech Stack
 
@@ -24,10 +113,14 @@ RideFix Bro is a high-performance, multi-agent AI assistant designed to diagnose
 
 ## 🧠 How It Works (The Architecture)
 
-RideFix Bro isn't just a simple chatbot. It uses a **Multi-Agent Orchestration Loop**:
-1. **Dynamic Tool Routing:** The LLM decides whether to search the internet (for latest gear prices/reviews) or query the Vector DB (for specific bike torque specs and error codes).
-2. **Custom Message Translation:** A custom `GeminiMessageConnector` middleware intercepts and translates AutoGen SDK messages into Gemini-compatible structures, preventing `400 Bad Request` proxy sequence errors.
-3. **Thread-Safe Memory:** Uses a `ConcurrentDictionary` and `SemaphoreSlim` to maintain perfect chat history sequences per user session without race conditions.
+The current implementation uses **one tool-enabled agent**, not a multi-agent
+swarm. Responsibilities follow the request flow:
+
+1. **HTTP setup (`Program.cs`):** Registers services and defines request-size and request-rate controls without applying them globally.
+2. **API entry (`ChatController.AskBro`):** Opts into the chat limits, rejects requests when chat capacity is busy, calls the chat service, and returns HTTP responses.
+3. **Input validation (`ChatInputValidator`):** Checks message/session lengths and validates an optional JPEG or PNG image.
+4. **Conversation flow (`AiManagerService`):** Retains complete conversation turns, tracks tool budgets, and saves successful answers.
+5. **Tools and provider messages:** `MechanicBroAgent` obtains a model reply, checks requested tools, and then executes them. `GeminiMessageConnector` preserves provider metadata when converting messages. `InMemoryChatStore` serializes updates within each session.
 
 ## 🛠️ Quick Setup (Local Development)
 

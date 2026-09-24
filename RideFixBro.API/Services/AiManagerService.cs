@@ -1,59 +1,50 @@
 using AutoGen.Core;
 using RideFixBro.API.Agents;
+using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore.Interfaces;
 
 namespace RideFixBro.API.Services
 {
-	public class AiManagerService
-	{
-		private readonly IAgent _agent;
-		private readonly IChatHistoryStore _chatHistoryStore;
-		private readonly ILogger<AiManagerService> _logger;
-		private readonly int _maxToolRounds;
+	public class AiManagerService(IAgent agent, IChatHistoryStore chatStore,
+        ChatLimitsOptions limits, ChatInputValidator inputValidator, ILogger<AiManagerService> logger)
+    {
+		private readonly IAgent _agent = agent;
+		private readonly IChatHistoryStore _chatHistoryStore = chatStore;
+		private readonly ILogger<AiManagerService> _logger = logger;
+		private readonly ChatLimitsOptions _limits = limits;
+		private readonly ChatInputValidator _inputValidator = inputValidator;
 
-		public AiManagerService(IAgent agent, IChatHistoryStore chatStore,
-			IConfiguration config, ILogger<AiManagerService> logger)
-		{
-			_agent = agent;
-			_chatHistoryStore = chatStore;
-			_logger = logger;
-			_maxToolRounds = config.GetValue("Chat:MaxToolRounds", 5);
-			if (_maxToolRounds <= 0)
-			{
-				throw new ArgumentOutOfRangeException(nameof(config), "Chat:MaxToolRounds must be positive.");
-			}
-		}
-
-		public async Task<string> AskMechanicBro(string sessionId, string userMessage,
+        public async Task<string> AskMechanicBro(string sessionId, string userMessage,
 			string? base64Image = null, CancellationToken cancellationToken = default)
 		{
-			ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-			ArgumentException.ThrowIfNullOrWhiteSpace(userMessage);
-
-			IMessage messageToSend = new TextMessage(Role.User, userMessage);
-			if (!string.IsNullOrEmpty(base64Image))
-			{
-				var dataUri = base64Image.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)
-					? base64Image
-					: $"data:image/jpeg;base64,{base64Image}";
-				messageToSend = new MultiModalMessage(Role.User,
-				[
-					new TextMessage(Role.User, userMessage),
-					new ImageMessage(Role.User, dataUri)
-				]);
-			}
-
 			try
 			{
+				var dataUri = _inputValidator.Validate(sessionId, userMessage, base64Image);
+				IMessage messageToSend = new TextMessage(Role.User, userMessage);
+				if (dataUri is not null)
+				{
+					messageToSend = new MultiModalMessage(Role.User,
+					[
+						new TextMessage(Role.User, userMessage),
+						new ImageMessage(Role.User, dataUri)
+					]);
+				}
+
 				// Working history pe turn chala; final answer mila tabhi store isse save karega.
 				return await _chatHistoryStore.UpdateHistoryAsync(sessionId, async history =>
 				{
+					TrimHistory(history, _limits.MaxHistoryTurns - 1);
 					history.Add(messageToSend);
+					var toolCallsExecuted = 0;
 					for (var round = 0; ; round++)
 					{
 						cancellationToken.ThrowIfCancellationRequested();
 						var reply = await _agent.GenerateReplyAsync(history,
-							new MechanicReplyOptions { ExecuteTools = round < _maxToolRounds },
+							new MechanicReplyOptions
+							{
+								ExecuteTools = round < _limits.MaxToolRounds,
+								RemainingToolCalls = _limits.MaxToolCallsPerRequest - toolCallsExecuted
+							},
 							cancellationToken);
 
 						// Tool ka result user ka final answer nahi hai; woh Gemini se alag se aayega.
@@ -64,10 +55,10 @@ namespace RideFixBro.API.Services
 							return text.Content;
 						}
 
-						if (round >= _maxToolRounds)
+						if (round >= _limits.MaxToolRounds)
 						{
-							throw new InvalidOperationException(
-								$"Tool-calling limit of {_maxToolRounds} rounds reached. Try a narrower question.");
+							throw new ChatLimitExceededException(
+								$"Bhai, {_limits.MaxToolRounds} rounds ki tool limit aa gayi. Sawal thoda chhota kar.");
 						}
 
 						if (reply is not AggregateMessage<ToolCallMessage, ToolCallResultMessage> toolReply)
@@ -77,6 +68,7 @@ namespace RideFixBro.API.Services
 						}
 
 						ValidateToolExchange(toolReply);
+						toolCallsExecuted += toolReply.Message1.ToolCalls.Count();
 						// Request + results saath rakh; agli iteration mein Gemini inhe padhke aage bolega.
 						history.Add(toolReply);
 					}
@@ -86,10 +78,54 @@ namespace RideFixBro.API.Services
 			{
 				throw;
 			}
+			catch (ChatInputException)
+			{
+				throw;
+			}
+			catch (ChatLimitExceededException ex)
+			{
+				_logger.LogWarning("Chat budget exceeded; incomplete turn not saved: {Reason}", ex.Message);
+				throw;
+			}
 			catch (Exception ex)
 			{
 				_logger.LogError(ex, "Mechanic chat failed; the incomplete turn was not saved.");
 				throw;
+			}
+		}
+
+		private static void TrimHistory(List<IMessage> history, int turnsToKeep)
+		{
+			if (turnsToKeep == 0)
+			{
+				history.Clear();
+				return;
+			}
+
+			var turnsFound = 0;
+			for (var index = history.Count - 1; index >= 0; index--)
+			{
+				var isUserMessage = false;
+				if (history[index] is TextMessage text)
+				{
+					isUserMessage = text.Role == Role.User;
+				}
+				else if (history[index] is MultiModalMessage image)
+				{
+					isUserMessage = image.Role == Role.User;
+				}
+
+				if (!isUserMessage)
+				{
+					continue;
+				}
+				turnsFound++;
+				if (turnsFound == turnsToKeep)
+				{
+					// Latest allowed turns mil gaye; unse pehle ka poora context hata do.
+					history.RemoveRange(0, index);
+					return;
+				}
 			}
 		}
 

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using OpenAI;
 using OpenAI.Chat;
 using RideFixBro.API.Agents;
+using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.Services;
 using System.ClientModel;
@@ -185,7 +186,7 @@ namespace RideFixBro.API.Tests
 				return Task.FromResult("result");
 			});
 			var store = new InMemoryChatStore();
-			var error = await Assert.ThrowsAsync<InvalidOperationException>(
+			var error = await Assert.ThrowsAsync<ChatLimitExceededException>(
 				() => CreateManager(agent, store).AskMechanicBro("session", "Search"));
 
 			Assert.Contains("5 rounds", error.Message);
@@ -227,7 +228,7 @@ namespace RideFixBro.API.Tests
 		{
 			using var handler = new RecordingHandler(TextReply("Hi bro"));
 			var agent = CreateAgent(handler, _ => throw new InvalidOperationException("No tool expected"));
-			var image = "data:image/png;base64,aW1hZ2U=";
+			var image = $"data:image/png;base64,{Convert.ToBase64String(ImageFixtures.Png())}";
 			var store = new InMemoryChatStore();
 
 			Assert.Equal("Hi bro", await CreateManager(agent, store).AskMechanicBro("session", "Hi", image));
@@ -240,7 +241,7 @@ namespace RideFixBro.API.Tests
 		public async Task EmptySessionIdIsRejectedBeforeCallingTheProvider()
 		{
 			using var handler = new RecordingHandler();
-			await Assert.ThrowsAsync<ArgumentException>(
+			await Assert.ThrowsAsync<ChatInputException>(
 				() => CreateManager(CreateAgent(handler), new InMemoryChatStore()).AskMechanicBro("", "Hi"));
 			Assert.Empty(handler.Requests);
 		}
@@ -303,10 +304,19 @@ namespace RideFixBro.API.Tests
 				["Chat:MaxToolRounds"] = maxToolRounds.ToString()
 			}).Build();
 
-		private static AiManagerService CreateManager(IAgent agent, InMemoryChatStore store, int maxToolRounds = 5) =>
-			new(agent, store, Configuration(maxToolRounds), NullLogger<AiManagerService>.Instance);
+		internal static AiManagerService CreateManager(IAgent agent, InMemoryChatStore store,
+			int maxToolRounds = 5, int maxToolCalls = 6, int maxHistoryTurns = 10)
+		{
+			var limits = new ChatLimitsOptions
+			{
+				MaxToolRounds = maxToolRounds,
+				MaxToolCallsPerRequest = maxToolCalls,
+				MaxHistoryTurns = maxHistoryTurns
+			};
+			return new(agent, store, limits, new ChatInputValidator(limits), NullLogger<AiManagerService>.Instance);
+		}
 
-		private static IAgent CreateAgent(RecordingHandler handler,
+		internal static IAgent CreateAgent(RecordingHandler handler,
 			Func<string, Task<string>>? internet = null, Func<string, Task<string>>? manual = null) =>
 			MechanicBroAgent.Create(CreateClient(handler),
 			[
@@ -340,7 +350,7 @@ namespace RideFixBro.API.Tests
 				RetryPolicy = new ClientRetryPolicy(0)
 			});
 
-		private static object Call(string id, string name, string arguments, string? signature = null)
+		internal static object Call(string id, string name, string arguments, string? signature = null)
 		{
 			var call = new Dictionary<string, object>
 			{
@@ -355,10 +365,10 @@ namespace RideFixBro.API.Tests
 			return call;
 		}
 
-		private static string ToolReply(params object[] calls) => Completion(
+		internal static string ToolReply(params object[] calls) => Completion(
 			new { role = "assistant", content = (string?)null, tool_calls = calls }, "tool_calls");
 
-		private static string TextReply(string text) => Completion(new { role = "assistant", content = text }, "stop");
+		internal static string TextReply(string text) => Completion(new { role = "assistant", content = text }, "stop");
 
 		private static string Completion(object message, string finishReason) => JsonSerializer.Serialize(new
 		{
@@ -376,7 +386,7 @@ namespace RideFixBro.API.Tests
 		private static string?[] Roles(JsonElement request) =>
 			request.GetProperty("messages").EnumerateArray().Select(message => message.GetProperty("role").GetString()).ToArray();
 
-		private static void AssertValidSequence(JsonElement request)
+		internal static void AssertValidSequence(JsonElement request)
 		{
 			var pending = new HashSet<string>();
 			foreach (var message in request.GetProperty("messages").EnumerateArray())

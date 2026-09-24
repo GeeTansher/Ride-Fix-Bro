@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using RideFixBro.API.Models;
 using RideFixBro.API.Services;
 
@@ -6,54 +7,22 @@ namespace RideFixBro.API.Controllers
 {
 	[ApiController]
 	[Route("api/[controller]")]
-	public class ChatController : ControllerBase
+	public class ChatController(AiManagerService aiManager, SemaphoreSlim chatSlots) : ControllerBase
 	{
-		private readonly AiManagerService _aiManager;
+		private readonly AiManagerService _aiManager = aiManager;
+		private readonly SemaphoreSlim _chatSlots = chatSlots;
 
-		private readonly VectorDbService _vectorDb;
-
-		public ChatController(AiManagerService aiManager, VectorDbService vectorDb)
-		{
-			_aiManager = aiManager;
-			_vectorDb = vectorDb;
-		}
-
-		// Manual vector form m Upload ke liye
-		[HttpPost("upload-dummy-manual")]
-		public async Task<IActionResult> UploadDummyManual()
-		{
-			// Apni X440 ka ek dummy fix banaya
-			var chainFix = "Harley Davidson X440 Chain Slack: The ideal chain slack for Harley Davidson X440 is 25mm to 30mm. You should check the chain tension every 500 km. Lube it properly. If the chain makes a grinding noise, check the front sprocket.";
-
-			var result = await _vectorDb.UploadManualChunkAsync("chain_slack_01", chainFix);
-
-			return Ok(new { Message = result });
-		}
-
-		[HttpPost("upload-pdf-manual")]
-		public async Task<IActionResult> UploadPdfManual()
-		{
-			// apni X440 PDF ka exact local path daal de.
-			string pdfPath = @"C:\Users\vrgpv\Downloads\hd_x440_apr_2025.pdf";
-
-			var result = await _vectorDb.ProcessAndUploadPdfAsync(pdfPath);
-
-			return Ok(new { Message = result });
-		}
-
-		[HttpPost("ask")]
+        [HttpPost("ask")]
+		// Ye do rules sirf Ask ke liye hain, poore controller ke liye nahi.
+		[EnableRateLimiting("chat")]
+		[ServiceFilter(typeof(RequestSizeLimitAttribute))]
 		// Bhai, ye token JSON se nahi aata; ASP.NET request abort hone ka signal deta hai.
 		public async Task<IActionResult> AskBro([FromBody] ChatRequest request, CancellationToken cancellationToken)
 		{
-			if (string.IsNullOrWhiteSpace(request.SessionId))
+			// Ask calls ye slots share karti hain. Busy ho toh wait nahi, seedha 429.
+			if (!await _chatSlots.WaitAsync(0, cancellationToken))
 			{
-				return BadRequest(new { Error = "A nonempty SessionId is required." });
-			}
-
-			// Agar user ne khali message bhej diya
-			if (string.IsNullOrWhiteSpace(request.Message))
-			{
-				return BadRequest(new { Error = "Abe bhai, blank message kyu bhej raha hai? Kuch likh toh de!" });
+				return StatusCode(429, new { Error = "Bhai, ek chat abhi chal rahi hai. Uske baad dobara try kar." });
 			}
 
 			try
@@ -67,10 +36,22 @@ namespace RideFixBro.API.Controllers
 				// Request cancel hui hai; ise neeche wale catch mein server crash mat bana.
 				throw;
 			}
-			catch (Exception ex)
+			catch (ChatInputException ex)
 			{
-				// Agar kuch phata toh seedha error milega
-				return StatusCode(500, new { Error = $"Bhai, server mein aag lag gayi: {ex.Message}" });
+				return StatusCode(ex.StatusCode, new { Error = ex.Message });
+			}
+			catch (ChatLimitExceededException ex)
+			{
+				return UnprocessableEntity(new { Error = ex.Message });
+			}
+			catch (Exception)
+			{
+				// Asli exception service logs mein hai; provider/internal details client ko mat bhej.
+				return StatusCode(500, new { Error = "Bhai, abhi answer nahi aa paaya. Thodi der baad dobara try kar." });
+			}
+			finally
+			{
+				_chatSlots.Release();
 			}
 		}
 	}

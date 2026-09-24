@@ -75,12 +75,14 @@ namespace RideFixBro.API.Agents
 	{
 		// Ye apne middleware ka switch hai, Gemini API ka parameter nahi.
 		public bool ExecuteTools { get; init; } = true;
+		public int RemainingToolCalls { get; init; } = int.MaxValue;
 	}
 
 	internal sealed class MechanicToolMiddleware : IMiddleware
 	{
 		private readonly FunctionCallMiddleware _execute;
 		private readonly FunctionCallMiddleware _describe;
+		private readonly IDictionary<string, Func<string, Task<string>>> _tools;
 
 		public MechanicToolMiddleware(IEnumerable<FunctionContract> functions,
 			IDictionary<string, Func<string, Task<string>>> functionMap)
@@ -88,18 +90,64 @@ namespace RideFixBro.API.Agents
 			var contracts = functions.ToArray();
 			_execute = new FunctionCallMiddleware(contracts, functionMap);
 			_describe = new FunctionCallMiddleware(contracts);
+			_tools = functionMap;
 		}
 
 		public string Name => nameof(MechanicToolMiddleware);
 
-		public Task<IMessage> InvokeAsync(MiddlewareContext context, IAgent agent,
+		public async Task<IMessage> InvokeAsync(MiddlewareContext context, IAgent agent,
 			CancellationToken cancellationToken = default)
 		{
-			// Budget khatam: final answer aane de, par ek aur tool batch mat chala.
-			var middleware = context.Options is MechanicReplyOptions { ExecuteTools: false }
-				? _describe
-				: _execute;
-			return middleware.InvokeAsync(context, agent, cancellationToken);
+			var executeTools = true;
+			var remaining = int.MaxValue;
+			if (context.Options is MechanicReplyOptions options)
+			{
+				executeTools = options.ExecuteTools;
+				remaining = options.RemainingToolCalls;
+			}
+
+			// Pehle se tool request di ho toh model ko dobara bulane ki zarurat nahi.
+			if (context.Messages.LastOrDefault() is ToolCallMessage pendingCall)
+			{
+				if (!executeTools)
+				{
+					return pendingCall;
+				}
+				ValidateToolRequest(pendingCall, remaining);
+				return await _execute.InvokeAsync(context, agent, cancellationToken);
+			}
+
+			// 1. Gemini ka reply lo. Abhi tools execute nahi hue hain.
+			var reply = await _describe.InvokeAsync(context, agent, cancellationToken);
+			if (reply is not ToolCallMessage call || !executeTools)
+			{
+				return reply;
+			}
+
+			// 2. Poora batch check karo, phir 3. tools chalao.
+			ValidateToolRequest(call, remaining);
+			var executionContext = new MiddlewareContext(new IMessage[] { call }, context.Options);
+			var result = await _execute.InvokeAsync(executionContext, agent, cancellationToken);
+			if (result is not ToolCallResultMessage toolResult)
+			{
+				throw new InvalidOperationException("Tool execution did not return a result message.");
+			}
+			return new ToolCallAggregateMessage(call, toolResult, from: agent.Name);
+		}
+
+		private void ValidateToolRequest(ToolCallMessage call, int remaining)
+		{
+			if (call.ToolCalls.Count() > remaining)
+			{
+				throw new ChatLimitExceededException("Bhai, is request ka tool-call budget khatam ho raha hai. Sawal thoda chhota kar.");
+			}
+			foreach (var tool in call.ToolCalls)
+			{
+				if (!_tools.ContainsKey(tool.FunctionName))
+				{
+					throw new InvalidOperationException($"Tool '{tool.FunctionName}' is not registered.");
+				}
+			}
 		}
 	}
 }
