@@ -31,20 +31,23 @@ limits cause startup validation to fail rather than silently disabling controls.
 Message and image limits are enforced server-side. JPEG and PNG content is
 decoded and validated rather than relying solely on the declared MIME type.
 The request-rate and request-body limits apply only to `POST /api/Chat/ask`.
-`Program.cs` registers the named rate policy and ASP.NET Core's built-in
-`RequestSizeLimitAttribute`; registration does not apply them globally.
+`Program.cs` registers the named rate policy and `ChatBodyLimit`, a named class
+that reuses ASP.NET Core's built-in `RequestSizeLimitAttribute`. Registration
+does not apply these controls globally.
 The Ask action explicitly selects these controls:
 
 ```csharp
-[EnableRateLimiting("chat")]
-[ServiceFilter(typeof(RequestSizeLimitAttribute))]
+[EnableRateLimiting(ChatLimitsOptions.SectionName)]
+[ServiceFilter(typeof(ChatBodyLimit))]
 ```
 
 The size filter uses the configured `MaxRequestBodyBytes` value and the web
 server enforces it even when `Content-Length` is absent. No custom body-buffering
 filter is required. Other controller actions do not inherit these chat-specific
 limits unless they explicitly opt in; normal web-server limits still apply.
-Endpoints opting into the same `"chat"` policy would share its rate bucket.
+Endpoints opting into the same named rate policy would share its rate bucket.
+Additional body-size groups can use their own named filter classes when needed;
+only `ChatBodyLimit` is currently registered.
 
 The Ask action also uses a shared `SemaphoreSlim` to admit chat processing only
 when a slot is available, releasing the slot in `finally`. Unrelated actions do

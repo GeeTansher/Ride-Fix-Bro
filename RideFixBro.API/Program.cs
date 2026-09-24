@@ -1,11 +1,11 @@
 using AutoGen.Core;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using OpenAI.Chat;
 using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
+using RideFixBro.API.Filters;
 using RideFixBro.API.Services;
 using Scalar.AspNetCore;
 using System.Globalization;
@@ -19,7 +19,7 @@ chatLimits.Validate();
 
 builder.Services.AddControllers();
 // Sirf register kiya hai; jis action par ServiceFilter lagega, wahi ye limit use karega.
-builder.Services.AddSingleton(new RequestSizeLimitAttribute(chatLimits.MaxRequestBodyBytes));
+builder.Services.AddSingleton(new ChatBodyLimit(chatLimits.MaxRequestBodyBytes));
 builder.Services.AddSingleton(chatLimits);
 builder.Services.AddSingleton<ChatInputValidator>();
 // free tier h to concurrent requests limit lagana padega; nahi toh Gemini ke free tier me 429 aa jayega, else anyone sponser!!

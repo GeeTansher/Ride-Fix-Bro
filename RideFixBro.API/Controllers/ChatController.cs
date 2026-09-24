@@ -1,5 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using RideFixBro.API.Configuration;
+using RideFixBro.API.Filters;
 using RideFixBro.API.Models;
 using RideFixBro.API.Services;
 
@@ -14,8 +16,8 @@ namespace RideFixBro.API.Controllers
 
         [HttpPost("ask")]
 		// Ye do rules sirf Ask ke liye hain, poore controller ke liye nahi.
-		[EnableRateLimiting("chat")]
-		[ServiceFilter(typeof(RequestSizeLimitAttribute))]
+		[EnableRateLimiting(ChatLimitsOptions.SectionName)]
+		[ServiceFilter(typeof(ChatBodyLimit))]
 		// Bhai, ye token JSON se nahi aata; ASP.NET request abort hone ka signal deta hai.
 		public async Task<IActionResult> AskBro([FromBody] ChatRequest request, CancellationToken cancellationToken)
 		{
