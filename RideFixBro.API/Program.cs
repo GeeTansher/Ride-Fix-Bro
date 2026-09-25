@@ -1,5 +1,6 @@
 using AutoGen.Core;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using OpenAI.Chat;
 using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
@@ -51,8 +52,22 @@ builder.Services.AddRateLimiter(options =>
 });
 
 // services
+builder.Services.AddDbContext<RideFixBroDbContext>(options =>
+{
+	// Azure SQL connection string User Secrets mein "ConnectionStrings:RideFixBro",
+	// ya Azure app setting "ConnectionStrings__RideFixBro" mein rakhna; repo mein password nahi.
+	var connectionString = builder.Configuration.GetConnectionString("RideFixBro");
+	if (string.IsNullOrWhiteSpace(connectionString))
+	{
+		throw new InvalidOperationException(
+			"SQL is not configured. Set ConnectionStrings:RideFixBro in User Secrets or ConnectionStrings__RideFixBro in the environment.");
+	}
+	options.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure());
+});
+
 builder.Services.AddScoped<RideFixBro.API.Services.AiManagerService>();
 builder.Services.AddSingleton<RideFixBro.API.Services.VectorDbService>();
+// Filhaal running chat RAM mein rahegi; SQL store auth/ownership ke saath wire karenge.
 builder.Services.AddSingleton<IChatHistoryStore, InMemoryChatStore>();
 builder.Services.AddSingleton<ChatClient>(services =>
 {
