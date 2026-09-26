@@ -1,4 +1,5 @@
 <Solution>
-  <Project Path="RideFixBro.API.csproj" />
   <Project Path="../RideFixBro.API.Tests/RideFixBro.API.Tests.csproj" />
+  <Project Path="../RideFixBro.Data/RideFixBro.Data.csproj" Id="d3c233a6-4eff-407c-be8e-8fee993675a6" />
+  <Project Path="RideFixBro.API.csproj" />
 </Solution>

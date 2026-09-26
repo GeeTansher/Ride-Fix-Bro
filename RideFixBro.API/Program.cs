@@ -1,5 +1,6 @@
 using AutoGen.Core;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using OpenAI.Chat;
 using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
@@ -7,6 +8,7 @@ using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
 using RideFixBro.API.Filters;
 using RideFixBro.API.Services;
+using RideFixBro.Data.Entities;
 using Scalar.AspNetCore;
 using System.Globalization;
 using System.Threading.RateLimiting;
@@ -69,6 +71,10 @@ builder.Services.AddScoped<IAgent>(services => MechanicBroAgent.Create(
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+
+// database
+builder.Services.AddDbContext<RideFixBroDbContext>(options =>
+	options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 var app = builder.Build();
 
