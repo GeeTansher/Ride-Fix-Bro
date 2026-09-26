@@ -15,9 +15,9 @@ public partial class Message
 
     public string? PayloadJson { get; set; }
 
-    public int? TurnNumber { get; set; }
+    public int TurnNumber { get; set; }
 
-    public int? SequenceNumber { get; set; }
+    public int SequenceNumber { get; set; }
 
     public DateTime Timestamp { get; set; }
 

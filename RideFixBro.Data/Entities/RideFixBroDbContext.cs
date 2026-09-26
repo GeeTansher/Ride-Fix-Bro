@@ -34,17 +34,7 @@ public partial class RideFixBroDbContext : DbContext
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("(getutcdate())");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
 
-            entity.HasOne(d => d.UserBike).WithMany(p => p.ChatSessionUserBikes)
-                .HasForeignKey(d => d.UserBikeId)
-                .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK_ChatSessions_UserBikes");
-
-            entity.HasOne(d => d.User).WithMany(p => p.ChatSessions)
-                .HasForeignKey(d => d.UserId)
-                .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK_ChatSessions_Users");
-
-            entity.HasOne(d => d.UserBikeNavigation).WithMany(p => p.ChatSessionUserBikeNavigations)
+            entity.HasOne(d => d.UserBike).WithMany(p => p.ChatSessions)
                 .HasPrincipalKey(p => new { p.Id, p.UserId })
                 .HasForeignKey(d => new { d.UserBikeId, d.UserId })
                 .OnDelete(DeleteBehavior.ClientSetNull)
@@ -75,7 +65,7 @@ public partial class RideFixBroDbContext : DbContext
 
         modelBuilder.Entity<Message>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Messages__3214EC072D22A476");
+            entity.HasKey(e => e.Id).HasName("PK__Messages__3214EC07F439746A");
 
             entity.ToTable("Messages", "RideFix");
 

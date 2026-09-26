@@ -62,13 +62,9 @@ CREATE TABLE RideFix.ChatSessions (
     IsActive BIT NOT NULL DEFAULT 1,
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     
-    CONSTRAINT FK_ChatSessions_Users FOREIGN KEY (UserId) REFERENCES RideFix.Users(Id),
-    -- No cascade delete here to prevent accidental chat wipeouts
-    CONSTRAINT FK_ChatSessions_UserBikes FOREIGN KEY (UserBikeId) REFERENCES RideFix.UserBikes(Id),
     -- Ye cross-check karta hai ki jo bike chat mein hai, wo sach mein usi user ki hai
     CONSTRAINT FK_ChatSessions_UserBikeOwner FOREIGN KEY (UserBikeId, UserId) REFERENCES RideFix.UserBikes (Id, UserId)
 );
-
 
 -- 6. Messages Table (The Heavy Lifter)
 CREATE TABLE RideFix.Messages (
@@ -77,8 +73,8 @@ CREATE TABLE RideFix.Messages (
     Role NVARCHAR(50) NOT NULL,
     Content NVARCHAR(MAX) NULL,
     PayloadJson NVARCHAR(MAX) NULL,
-    TurnNumber INT NULL,
-    SequenceNumber INT NULL,
+    TurnNumber INT NOT NULL,
+    SequenceNumber INT NOT NULL,
     Timestamp DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     
     CONSTRAINT FK_Messages_ChatSessions FOREIGN KEY (ChatSessionId) REFERENCES RideFix.ChatSessions(Id) ON DELETE CASCADE,
@@ -89,7 +85,7 @@ CREATE TABLE RideFix.Messages (
     CONSTRAINT CK_Messages_Content CHECK (Content IS NOT NULL OR PayloadJson IS NOT NULL),
     CONSTRAINT CK_Messages_Order CHECK (
         (TurnNumber IS NULL AND SequenceNumber IS NULL) OR 
-        (TurnNumber > 0 AND SequenceNumber > 0)
+        (TurnNumber IS NOT NULL AND SequenceNumber IS NOT NULL AND TurnNumber > 0 AND SequenceNumber > 0)
     ),
     
     -- Ek session ke andar same sequence number dobara nahi aa sakta

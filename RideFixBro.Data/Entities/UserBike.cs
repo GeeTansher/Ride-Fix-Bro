@@ -15,9 +15,7 @@ public partial class UserBike
 
     public virtual MasterBike Bike { get; set; } = null!;
 
-    public virtual ICollection<ChatSession> ChatSessionUserBikeNavigations { get; set; } = new List<ChatSession>();
-
-    public virtual ICollection<ChatSession> ChatSessionUserBikes { get; set; } = new List<ChatSession>();
+    public virtual ICollection<ChatSession> ChatSessions { get; set; } = new List<ChatSession>();
 
     public virtual User User { get; set; } = null!;
 }
