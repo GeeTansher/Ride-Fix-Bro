@@ -11,7 +11,13 @@ public partial class Message
 
     public string Role { get; set; } = null!;
 
-    public string Content { get; set; } = null!;
+    public string? Content { get; set; }
+
+    public string? PayloadJson { get; set; }
+
+    public int? TurnNumber { get; set; }
+
+    public int? SequenceNumber { get; set; }
 
     public DateTime Timestamp { get; set; }
 

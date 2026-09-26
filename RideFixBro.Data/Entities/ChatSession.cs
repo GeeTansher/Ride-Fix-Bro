@@ -20,4 +20,6 @@ public partial class ChatSession
     public virtual User User { get; set; } = null!;
 
     public virtual UserBike UserBike { get; set; } = null!;
+
+    public virtual UserBike UserBikeNavigation { get; set; } = null!;
 }
