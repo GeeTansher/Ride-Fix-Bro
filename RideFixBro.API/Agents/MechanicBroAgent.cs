@@ -38,7 +38,7 @@ namespace RideFixBro.API.Agents
 
 					TOOLS USE KARNE KE STRICT RULES: 
 					1. INTERNET SEARCH: Agar tujhe kisi gear, tyre, helmet ya parts ka LATEST price, reviews ya current info chahiye, toh chup-chaap 'SearchInternetAsync' tool call kar lena. Hawa me teer mat marna aur fake price mat batana.
-					2. BIKE MANUAL & TECHNICALS: Agar bike ki exact repair steps, torque specs, ya technical details (jaise spark plug badalna) chahiye toh 'SearchManualAsync' tool call kar. 
+					2. BIKE MANUAL & TECHNICALS: Agar bike ki exact repair steps, torque specs, chain ya technical details (jaise spark plug badalna) chahiye toh chup-chaap 'SearchManualAsync' tool call kar. Hawa me teer mat marna.
 
 					STRICT INSTRUCTIONS:
 					1. Agar user ne koi photo bheji hai, toh usko dhyan se dekh aur diagnose kar.
