@@ -1,13 +1,20 @@
 using AutoGen.Core;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using RideFixBro.Data.Entities;
 using RideFixBro.API.DataStore.Interfaces;
 using RideFixBro.API.Services;
 using System.Net;
 using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 
@@ -50,7 +57,7 @@ namespace RideFixBro.API.Tests
 			Assert.NotNull(rejected.Headers.RetryAfter);
 			Assert.False(string.IsNullOrWhiteSpace(await Error(rejected)));
 			Assert.Equal(5, factory.Agent.Calls);
-			Assert.Empty(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory("different"));
+			Assert.Empty(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:different"));
 			using var unaffected = await client.PostAsJsonAsync("/test/unrestricted", new { message = "Still available" });
 			Assert.Equal(HttpStatusCode.OK, unaffected.StatusCode);
 		}
@@ -115,7 +122,7 @@ namespace RideFixBro.API.Tests
 			Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
 			Assert.Contains("2000", await Error(rejected));
 			Assert.Equal(1, factory.Agent.Calls);
-			Assert.Equal(2, factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory("session").Count);
+			Assert.Equal(2, factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
 		}
 
 		[Theory]
@@ -169,7 +176,7 @@ namespace RideFixBro.API.Tests
 			});
 			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 			Assert.Equal(1, factory.Agent.Calls);
-			Assert.IsType<MultiModalMessage>(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory("session")[0]);
+			Assert.IsType<MultiModalMessage>(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:session")[0]);
 		}
 
 		[Fact]
@@ -186,7 +193,7 @@ namespace RideFixBro.API.Tests
 			using var failed = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "session", message = "Hi" });
 			Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
 			Assert.DoesNotContain("private-provider-details", await failed.Content.ReadAsStringAsync());
-			Assert.Empty(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory("session"));
+			Assert.Empty(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:session"));
 		}
 
 		private static async Task<string> Error(HttpResponseMessage response) =>
@@ -224,23 +231,68 @@ namespace RideFixBro.API.Tests
 
 	internal sealed class ChatApiFactory : WebApplicationFactory<Program>
 	{
+		private readonly SqliteConnection _database = new("Data Source=:memory:");
+		private bool _seeded;
 		public DemoAgent Agent { get; } = new();
 
-		public HttpClient Client() => CreateClient(new WebApplicationFactoryClientOptions
+		public HttpClient Client(bool authenticated = true)
 		{
-			BaseAddress = new Uri("https://localhost"),
-			AllowAutoRedirect = false
-		});
+			var client = CreateClient(new WebApplicationFactoryClientOptions
+			{
+				BaseAddress = new Uri("https://localhost"),
+				AllowAutoRedirect = false
+			});
+			if (!authenticated)
+			{
+				client.DefaultRequestHeaders.Authorization = null;
+			}
+			return client;
+		}
+
+		protected override void ConfigureClient(HttpClient client)
+		{
+			base.ConfigureClient(client);
+			if (!_seeded)
+			{
+				using var scope = Services.CreateScope();
+				var database = scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+				database.Database.EnsureCreated();
+				database.MasterUserRoles.AddRange(
+					new MasterUserRole { Id = 42, RoleName = "User", Description = "Test user" },
+					new MasterUserRole { Id = 84, RoleName = "Admin", Description = "Test administrator" });
+				database.SaveChanges();
+				_seeded = true;
+			}
+			client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AuthTestTokens.Create());
+		}
 
 		protected override void ConfigureWebHost(IWebHostBuilder builder)
 		{
 			builder.UseEnvironment("Testing");
+			builder.UseSetting("Supabase:ValidIssuer", AuthTestTokens.Issuer);
+			builder.UseSetting("Supabase:ValidAudience", "authenticated");
+			builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?>
+			{
+				["Supabase:ValidIssuer"] = AuthTestTokens.Issuer,
+				["Supabase:ValidAudience"] = "authenticated"
+			}));
+			_database.Open();
 			builder.ConfigureServices(services =>
 			{
 				services.AddControllers().AddApplicationPart(typeof(UnrestrictedTestController).Assembly);
 				services.RemoveAll<IAgent>();
 				services.AddSingleton<IAgent>(Agent);
+				services.RemoveAll<DbContextOptions<RideFixBroDbContext>>();
+				services.RemoveAll<IDbContextOptionsConfiguration<RideFixBroDbContext>>();
+				services.AddDbContext<RideFixBroDbContext>(options => options.UseSqlite(_database));
+				services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, AuthTestTokens.Configure);
 			});
+		}
+
+		public override async ValueTask DisposeAsync()
+		{
+			await base.DisposeAsync();
+			await _database.DisposeAsync();
 		}
 	}
 

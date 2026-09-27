@@ -1,9 +1,11 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.Filters;
 using RideFixBro.API.Models;
 using RideFixBro.API.Services;
+using System.Security.Claims;
 
 namespace RideFixBro.API.Controllers
 {
@@ -18,6 +20,7 @@ namespace RideFixBro.API.Controllers
 		// Ye do rules sirf Ask ke liye hain, poore controller ke liye nahi.
 		[EnableRateLimiting(ChatLimitsOptions.SectionName)]
 		[ServiceFilter(typeof(ChatBodyLimit))]
+		[Authorize]
 		// Bhai, ye token JSON se nahi aata; ASP.NET request abort hone ka signal deta hai.
 		public async Task<IActionResult> AskBro([FromBody] ChatRequest request, CancellationToken cancellationToken)
 		{
@@ -30,7 +33,9 @@ namespace RideFixBro.API.Controllers
 			try
 			{
 				// AiManagerService ko message pass kiya
-				var response = await _aiManager.AskMechanicBro(request.SessionId, request.Message, request.ImageData, cancellationToken);
+				var userId = Guid.Parse(User.FindFirstValue("sub")!);
+				var response = await _aiManager.AskMechanicBro(
+					userId, request.SessionId, request.Message, request.ImageData, cancellationToken);
 				return Ok(new { Reply = response });
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

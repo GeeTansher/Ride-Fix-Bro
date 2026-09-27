@@ -40,12 +40,12 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(agent, store);
 
-			Assert.Equal("Bhai, here is the answer.", await manager.AskMechanicBro("session", "First question"));
-			Assert.Equal("Bhai, follow-up answer.", await manager.AskMechanicBro("session", "Next question"));
+			Assert.Equal("Bhai, here is the answer.", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "First question"));
+			Assert.Equal("Bhai, follow-up answer.", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Next question"));
 
 			Assert.Equal(4, invoked.Count);
-			Assert.Equal(7, store.GetHistory("session").Count);
-			foreach (var exchange in store.GetHistory("session")
+			Assert.Equal(7, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
+			foreach (var exchange in store.GetHistory($"{AuthTestTokens.UserId:D}:session")
 				.OfType<AggregateMessage<ToolCallMessage, ToolCallResultMessage>>())
 			{
 				Assert.All(exchange.Message1.ToolCalls, call => Assert.Null(call.Result));
@@ -88,7 +88,7 @@ namespace RideFixBro.API.Tests
 			var agent = MechanicBroAgent.Create(CreateClient(modelHandler), tavily, vector);
 			var manager = CreateManager(agent, new InMemoryChatStore());
 
-			Assert.Equal("Found the price.", await manager.AskMechanicBro("session", "Search"));
+			Assert.Equal("Found the price.", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
 			Assert.Equal("helmet price", Assert.Single(searchHandler.Requests).GetProperty("query").GetString());
 			var tools = modelHandler.Requests[0].GetProperty("tools").EnumerateArray()
 				.Select(tool => tool.GetProperty("function").GetProperty("name").GetString()).ToArray();
@@ -107,8 +107,8 @@ namespace RideFixBro.API.Tests
 				new TavilySearchService(config, httpClient), new VectorDbService(config));
 			var store = new InMemoryChatStore();
 
-			await Assert.ThrowsAsync<ArgumentException>(() => CreateManager(agent, store).AskMechanicBro("session", "Search"));
-			Assert.Empty(store.GetHistory("session"));
+			await Assert.ThrowsAsync<ArgumentException>(() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
 			Assert.Single(handler.Requests);
 		}
 
@@ -124,9 +124,9 @@ namespace RideFixBro.API.Tests
 			var agent = CreateAgent(handler, _ => Task.FromResult(result!));
 
 			var error = await Assert.ThrowsAsync<InvalidOperationException>(
-				() => CreateManager(agent, store).AskMechanicBro("session", "Search"));
+				() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
 			Assert.Contains("empty result", error.Message);
-			Assert.Empty(store.GetHistory("session"));
+			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
 			Assert.Single(handler.Requests);
 		}
 
@@ -144,9 +144,9 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store);
 
-			await Assert.ThrowsAsync<InvalidOperationException>(() => manager.AskMechanicBro("session", "Failed turn"));
-			Assert.Empty(store.GetHistory("session"));
-			Assert.Equal("Recovered", await manager.AskMechanicBro("session", "New turn"));
+			await Assert.ThrowsAsync<InvalidOperationException>(() => manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Failed turn"));
+			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
+			Assert.Equal("Recovered", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "New turn"));
 			Assert.Equal(new[] { "system", "user" }, Roles(handler.Requests[1]));
 		}
 
@@ -161,13 +161,13 @@ namespace RideFixBro.API.Tests
 			handler.StatusCodes[2] = HttpStatusCode.BadRequest;
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store);
-			await manager.AskMechanicBro("session", "Saved question");
+			await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Saved question");
 
 			var error = await Assert.ThrowsAsync<ClientResultException>(
-				() => manager.AskMechanicBro("session", "Failed question"));
+				() => manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Failed question"));
 			Assert.Equal(400, error.Status);
-			Assert.Equal(2, store.GetHistory("session").Count);
-			Assert.Equal("Recovered", await manager.AskMechanicBro("session", "Retry"));
+			Assert.Equal(2, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
+			Assert.Equal("Recovered", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Retry"));
 			Assert.Equal(new[] { "system", "user", "assistant", "user" }, Roles(handler.Requests[3]));
 			Assert.DoesNotContain("Failed question", handler.Requests[3].GetRawText());
 		}
@@ -187,12 +187,12 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			var error = await Assert.ThrowsAsync<ChatLimitExceededException>(
-				() => CreateManager(agent, store).AskMechanicBro("session", "Search"));
+				() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
 
 			Assert.Contains("5 rounds", error.Message);
 			Assert.Equal(5, executions);
 			Assert.Equal(6, handler.Requests.Count);
-			Assert.Empty(store.GetHistory("session"));
+			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
 		}
 
 		[Fact]
@@ -204,8 +204,8 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(responses);
 			var store = new InMemoryChatStore();
 
-			Assert.Equal("Done", await CreateManager(CreateAgent(handler), store).AskMechanicBro("session", "Search"));
-			Assert.Equal(7, store.GetHistory("session").Count);
+			Assert.Equal("Done", await CreateManager(CreateAgent(handler), store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+			Assert.Equal(7, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
 			Assert.All(handler.Requests, request => AssertValidSequence(request));
 		}
 
@@ -218,8 +218,8 @@ namespace RideFixBro.API.Tests
 				TextReply("Second"));
 			var manager = CreateManager(CreateAgent(handler), new InMemoryChatStore(), maxToolRounds: 1);
 
-			Assert.Equal("First", await manager.AskMechanicBro("session", "First"));
-			Assert.Equal("Second", await manager.AskMechanicBro("session", "Second"));
+			Assert.Equal("First", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "First"));
+			Assert.Equal("Second", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Second"));
 			Assert.Equal(4, handler.Requests.Count);
 		}
 
@@ -231,10 +231,10 @@ namespace RideFixBro.API.Tests
 			var image = $"data:image/png;base64,{Convert.ToBase64String(ImageFixtures.Png())}";
 			var store = new InMemoryChatStore();
 
-			Assert.Equal("Hi bro", await CreateManager(agent, store).AskMechanicBro("session", "Hi", image));
+			Assert.Equal("Hi bro", await CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Hi", image));
 			var content = handler.Requests[0].GetProperty("messages")[1].GetProperty("content");
 			Assert.Equal(image, content[1].GetProperty("image_url").GetProperty("url").GetString());
-			Assert.Equal(2, store.GetHistory("session").Count);
+			Assert.Equal(2, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
 		}
 
 		[Fact]
@@ -242,7 +242,7 @@ namespace RideFixBro.API.Tests
 		{
 			using var handler = new RecordingHandler();
 			await Assert.ThrowsAsync<ChatInputException>(
-				() => CreateManager(CreateAgent(handler), new InMemoryChatStore()).AskMechanicBro("", "Hi"));
+				() => CreateManager(CreateAgent(handler), new InMemoryChatStore()).AskMechanicBro(AuthTestTokens.UserId, "", "Hi"));
 			Assert.Empty(handler.Requests);
 		}
 
@@ -261,9 +261,9 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 
-			await Assert.ThrowsAnyAsync<JsonException>(() => CreateManager(agent, store).AskMechanicBro("session", "Search"));
+			await Assert.ThrowsAnyAsync<JsonException>(() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
 			Assert.Equal(0, executions);
-			Assert.Empty(store.GetHistory("session"));
+			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
 		}
 
 		[Theory]
@@ -277,9 +277,9 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 
 			await Assert.ThrowsAsync<InvalidOperationException>(() =>
-				CreateManager(CreateAgent(handler), store).AskMechanicBro("session", "Search"));
+				CreateManager(CreateAgent(handler), store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
 			Assert.Single(handler.Requests);
-			Assert.Empty(store.GetHistory("session"));
+			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
 		}
 
 		[Theory]
@@ -290,8 +290,8 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(TextReply(text));
 			var store = new InMemoryChatStore();
 			await Assert.ThrowsAsync<InvalidOperationException>(() =>
-				CreateManager(CreateAgent(handler), store).AskMechanicBro("session", "Hi"));
-			Assert.Empty(store.GetHistory("session"));
+				CreateManager(CreateAgent(handler), store).AskMechanicBro(AuthTestTokens.UserId, "session", "Hi"));
+			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
 		}
 
 		internal static IConfiguration Configuration(int maxToolRounds = 5) =>

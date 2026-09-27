@@ -22,13 +22,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ridefixbro.viewmodel.ChatViewModel
 import com.example.ridefixbro.viewmodel.ChatMessage
 import com.mikepenz.markdown.m3.Markdown
 
 @Composable
-fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
+fun ChatScreen(viewModel: ChatViewModel) {
     // ViewModel se data observe kar rahe hain. Data change hoga, UI automatically update hoga!
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()

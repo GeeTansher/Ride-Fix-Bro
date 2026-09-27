@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using OpenAI.Chat;
 using RideFixBro.API.Agents;
+using RideFixBro.API.Authentication;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
@@ -24,6 +25,8 @@ builder.Services.AddControllers();
 builder.Services.AddSingleton(new ChatBodyLimit(chatLimits.MaxRequestBodyBytes));
 builder.Services.AddSingleton(chatLimits);
 builder.Services.AddSingleton<ChatInputValidator>();
+builder.Services.AddSupabaseAuthentication(builder.Configuration);
+builder.Services.AddScoped<AppUserService>();
 // free tier h to concurrent requests limit lagana padega; nahi toh Gemini ke free tier me 429 aa jayega, else anyone sponser!!
 builder.Services.AddSingleton<SemaphoreSlim>(_ =>
 	new SemaphoreSlim(chatLimits.MaxConcurrentRequests, chatLimits.MaxConcurrentRequests));
@@ -74,7 +77,14 @@ builder.Services.AddOpenApi();
 
 // database
 builder.Services.AddDbContext<RideFixBroDbContext>(options =>
-	options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+{
+	var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+	if (string.IsNullOrWhiteSpace(connectionString))
+	{
+		throw new InvalidOperationException("Set ConnectionStrings:DefaultConnection in User Secrets or Azure configuration.");
+	}
+	options.UseSqlServer(connectionString);
+});
 
 var app = builder.Build();
 
@@ -94,6 +104,14 @@ app.Use(async (context, next) =>
 			Error = "Bhai, request allowed size se badi hai. Data/file chhoti karke dobara try kar."
 		}, context.RequestAborted);
 	}
+	catch (UserStoreUnavailableException) when (!context.Response.HasStarted)
+	{
+		context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+		await context.Response.WriteAsJsonAsync(new
+		{
+			Error = "Bhai, account database abhi available nahi hai. Thodi der baad retry kar."
+		}, context.RequestAborted);
+	}
 });
 
 // Configure the HTTP request pipeline.
@@ -110,6 +128,7 @@ app.UseHttpsRedirection();
 
 app.UseRouting();
 app.UseRateLimiter();
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();

@@ -14,11 +14,15 @@ namespace RideFixBro.API.Services
 		private readonly ChatLimitsOptions _limits = limits;
 		private readonly ChatInputValidator _inputValidator = inputValidator;
 
-        public async Task<string> AskMechanicBro(string sessionId, string userMessage,
+        public async Task<string> AskMechanicBro(Guid userId, string sessionId, string userMessage,
 			string? base64Image = null, CancellationToken cancellationToken = default)
 		{
 			try
 			{
+				if (userId == Guid.Empty)
+				{
+					throw new ArgumentException("An authenticated user ID is required.", nameof(userId));
+				}
 				var dataUri = _inputValidator.Validate(sessionId, userMessage, base64Image);
 				IMessage messageToSend = new TextMessage(Role.User, userMessage);
 				if (dataUri is not null)
@@ -31,7 +35,9 @@ namespace RideFixBro.API.Services
 				}
 
 				// Working history pe turn chala; final answer mila tabhi store isse save karega.
-				return await _chatHistoryStore.UpdateHistoryAsync(sessionId, async history =>
+				// Client ka session ID akela key nahi: alag users ki same ID bhi separate rahegi.
+				var historyKey = $"{userId:D}:{sessionId}";
+				return await _chatHistoryStore.UpdateHistoryAsync(historyKey, async history =>
 				{
 					TrimHistory(history, _limits.MaxHistoryTurns - 1);
 					history.Add(messageToSend);
