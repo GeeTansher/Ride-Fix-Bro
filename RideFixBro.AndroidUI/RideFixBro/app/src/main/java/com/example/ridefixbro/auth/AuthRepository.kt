@@ -12,17 +12,15 @@ import io.github.jan.supabase.auth.Auth
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.Google
 import io.github.jan.supabase.auth.providers.builtin.IDToken
-import io.github.jan.supabase.auth.user.UserSession
+import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.createSupabaseClient
-import io.github.jan.supabase.exceptions.RestException
 import io.github.jan.supabase.logging.LogLevel
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.URI
@@ -30,15 +28,16 @@ import java.net.URISyntaxException
 import java.security.MessageDigest
 import java.util.UUID
 import kotlin.time.Clock
-import kotlin.time.Duration.Companion.seconds
 
 @OptIn(kotlin.time.ExperimentalTime::class)
 class AuthRepository(context: Context) {
     private val sessionManager = SecureSessionManager(context.applicationContext)
     private val credentialManager = CredentialManager.create(context.applicationContext)
-    private val sessionLock = Mutex()
-    private val _userId = MutableStateFlow<String?>(null)
-    val userId = _userId.asStateFlow()
+
+    // SDK status hi source of truth hai. Flow ke andar lazy setup se config errors UI tak pahunchte hain.
+    val sessionStatus: Flow<SessionStatus> = flow {
+        emitAll(supabase.auth.sessionStatus)
+    }
 
     private val supabase by lazy {
         validateAuthConfiguration(
@@ -49,19 +48,12 @@ class AuthRepository(context: Context) {
             defaultLogLevel = LogLevel.NONE
             install(Auth) {
                 sessionManager = this@AuthRepository.sessionManager
-                autoLoadFromStorage = false
-                alwaysAutoRefresh = false
-                enableLifecycleCallbacks = false
+                autoLoadFromStorage = true
+                autoSaveToStorage = true
+                alwaysAutoRefresh = true
+                enableLifecycleCallbacks = true
             }
         }
-    }
-
-    suspend fun restoreSession() = sessionLock.withLock {
-        supabase.auth.awaitInitialization()
-        supabase.auth.loadFromStorage(autoRefresh = false)
-        val session = supabase.auth.currentSessionOrNull()
-        _userId.value = session?.user?.id
-        if (session != null) requireUsableSession()
     }
 
     suspend fun signIn(activityContext: Context) {
@@ -79,69 +71,37 @@ class AuthRepository(context: Context) {
             throw LoginRequiredException("Google did not return an ID token.")
         }
         val googleToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-        sessionLock.withLock {
-            // Google ko hashed nonce diya; Supabase ko original nonce verification ke liye.
-            supabase.auth.signInWith(IDToken) {
-                provider = Google
-                idToken = googleToken
-                nonce = rawNonce
-            }
-            _userId.value = requireUsableSession().user?.id
-                ?: throw LoginRequiredException("Login did not return a user.")
+        // Google ko hashed nonce diya; Supabase ko original nonce verification ke liye.
+        supabase.auth.signInWith(IDToken) {
+            provider = Google
+            idToken = googleToken
+            nonce = rawNonce
         }
     }
 
-    suspend fun accessToken(expectedUserId: String): String = sessionLock.withLock {
-        if (_userId.value != expectedUserId) throw LoginRequiredException("The signed-in account changed.")
-        val session = requireUsableSession()
-        if (session.user?.id != expectedUserId) {
-            clearSession()
-            throw LoginRequiredException("The signed-in account changed.")
-        }
-        session.accessToken
+    suspend fun accessToken(expectedUserId: String): String {
+        supabase.auth.awaitInitialization()
+        // Refresh SDK karega. Hum expired/wrong-account token forward nahi karenge.
+        return requireAccessToken(supabase.auth.sessionStatus.value, expectedUserId)
     }
 
-    private suspend fun requireUsableSession(): UserSession {
-        val current = supabase.auth.currentSessionOrNull()
-            ?: throw LoginRequiredException("Sign in is required.")
-        if (current.expiresAt <= Clock.System.now() + 60.seconds) {
-            try {
-                // Refresh once under the lock; concurrent requests must not reuse the refresh token.
-                supabase.auth.refreshCurrentSession()
-            } catch (error: RestException) {
-                if (error.statusCode == 400 || error.statusCode == 401 || error.statusCode == 403) {
-                    clearSession()
-                    throw LoginRequiredException("The login session expired.")
-                }
-                throw error
-            }
+    suspend fun invalidateSession(expectedUserId: String, rejectedToken: String) {
+        val status = supabase.auth.sessionStatus.value
+        if (shouldInvalidateSession(status, expectedUserId, rejectedToken)) {
+            // Purane request ka 401 naye refreshed token/account ko logout nahi karega.
+            supabase.auth.clearSession()
         }
-        val session = supabase.auth.currentSessionOrNull()
-            ?: throw LoginRequiredException("Sign in is required.")
-        if (session.user?.id.isNullOrBlank() || session.accessToken.isBlank() ||
-            session.expiresAt <= Clock.System.now() || session.user?.id != current.user?.id) {
-            clearSession()
-            throw LoginRequiredException("The login session is invalid.")
-        }
-        return session
-    }
-
-    suspend fun invalidateSession(expectedUserId: String) = sessionLock.withLock {
-        if (_userId.value == expectedUserId) clearSession()
     }
 
     suspend fun signOut() {
         var remoteLogoutFailed = false
-        sessionLock.withLock {
-            _userId.value = null
-            try {
-                supabase.auth.signOut()
-            } catch (error: Exception) {
-                currentCoroutineContext().ensureActive()
-                remoteLogoutFailed = true
-            } finally {
-                withContext(NonCancellable) { clearSession() }
-            }
+        try {
+            supabase.auth.signOut()
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
+            remoteLogoutFailed = true
+        } finally {
+            withContext(NonCancellable) { supabase.auth.clearSession() }
         }
         try {
             credentialManager.clearCredentialState(ClearCredentialStateRequest())
@@ -154,16 +114,31 @@ class AuthRepository(context: Context) {
             throw RemoteSignOutException()
         }
     }
-
-    private suspend fun clearSession() {
-        _userId.value = null
-        supabase.auth.clearSession()
-    }
 }
 
 class LoginRequiredException(message: String) : Exception(message)
+class SessionNotReadyException : IOException("Session refresh is pending. Check the connection and retry.")
 class AuthSetupException : Exception("Set the three public auth values in local.properties.")
 class RemoteSignOutException : IOException("Local logout completed, but remote cleanup could not be confirmed.")
+
+@OptIn(kotlin.time.ExperimentalTime::class)
+internal fun requireAccessToken(status: SessionStatus, expectedUserId: String): String {
+    if (status is SessionStatus.Initializing || status is SessionStatus.RefreshFailure) {
+        throw SessionNotReadyException()
+    }
+    if (status !is SessionStatus.Authenticated || status.session.user?.id != expectedUserId ||
+        expectedUserId.isBlank() || status.session.accessToken.isBlank()) {
+        throw LoginRequiredException("Sign in with the expected account.")
+    }
+    if (status.session.expiresAt <= Clock.System.now()) {
+        throw SessionNotReadyException()
+    }
+    return status.session.accessToken
+}
+
+internal fun shouldInvalidateSession(status: SessionStatus, userId: String, rejectedToken: String): Boolean =
+    status is SessionStatus.Authenticated &&
+        status.session.user?.id == userId && status.session.accessToken == rejectedToken
 
 internal fun validateAuthConfiguration(url: String, publishableKey: String, googleClientId: String) {
     val uri = try { URI(url) } catch (_: URISyntaxException) { throw AuthSetupException() }

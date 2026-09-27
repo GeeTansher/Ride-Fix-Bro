@@ -9,13 +9,19 @@ import com.example.ridefixbro.auth.AuthRepository
 import com.example.ridefixbro.auth.AuthSetupException
 import com.example.ridefixbro.auth.LoginRequiredException
 import com.example.ridefixbro.auth.RemoteSignOutException
+import com.example.ridefixbro.auth.SessionNotReadyException
 import com.example.ridefixbro.model.response.UserProfileResponse
 import com.example.ridefixbro.network.RideFixBroClient
+import com.example.ridefixbro.network.RideFixApiInterface
+import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
 
@@ -26,37 +32,78 @@ data class AuthUiState(
     val error: String? = null
 )
 
-class AuthViewModel(private val auth: AuthRepository) : ViewModel() {
+class AuthViewModel(
+    private val auth: AuthRepository,
+    private val api: RideFixApiInterface = RideFixBroClient.api
+) : ViewModel() {
     private val _state = MutableStateFlow(AuthUiState())
     val state = _state.asStateFlow()
     private var authJob: Job? = null
+    private var sessionJob: Job? = null
+    private var signingOut = false
 
     init {
-        viewModelScope.launch {
-            auth.userId.drop(1).collect { userId ->
-                if (userId == null) {
-                    _state.value = _state.value.copy(signedIn = false, profile = null)
-                }
-            }
-        }
-        runAuth {
-            auth.restoreSession()
-            loadProfile()
-        }
+        observeSession()
     }
 
     fun signIn(context: Context) = runAuth {
         auth.signIn(context)
-        loadProfile()
     }
 
-    fun retry() = runAuth {
-        auth.restoreSession()
-        loadProfile()
+    fun retry() {
+        if (authJob?.isActive == true) return
+        // SDK restore/refresh khud karta hai. Retry sirf current status + API profile check karta hai.
+        observeSession()
+    }
+
+    private fun observeSession() {
+        sessionJob?.cancel()
+        sessionJob = viewModelScope.launch {
+            try {
+                auth.sessionStatus
+                    .distinctUntilChanged { previous, current ->
+                        // Token refresh par same account ke liye /me baar-baar mat call karo.
+                        previous is SessionStatus.Authenticated && current is SessionStatus.Authenticated &&
+                            previous.session.user?.id == current.session.user?.id
+                    }
+                    .collectLatest { status ->
+                        if (signingOut) return@collectLatest
+                        when (status) {
+                            SessionStatus.Initializing -> _state.value = AuthUiState(loading = true)
+                            is SessionStatus.NotAuthenticated -> {
+                                _state.value = AuthUiState(loading = authJob?.isActive == true)
+                            }
+                            is SessionStatus.RefreshFailure -> {
+                                _state.value = AuthUiState(
+                                    loading = false, signedIn = true,
+                                    error = "Session refresh nahi ho paayi. Internet check kar; SDK retry kar raha hai."
+                                )
+                            }
+                            is SessionStatus.Authenticated -> {
+                                _state.value = AuthUiState(loading = true, signedIn = true)
+                                try {
+                                    val userId = status.session.user?.id
+                                        ?: throw LoginRequiredException("Session has no user.")
+                                    loadProfile(userId)
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (error: Exception) {
+                                    showError(error)
+                                }
+                            }
+                        }
+                    }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                showError(error)
+            }
+        }
     }
 
     fun signOut() {
         if (authJob?.isActive == true) return
+        signingOut = true
         _state.value = AuthUiState(loading = true)
         authJob = viewModelScope.launch {
             try {
@@ -73,25 +120,23 @@ class AuthViewModel(private val auth: AuthRepository) : ViewModel() {
                         "Saved session cleanup complete nahi hui. App data clear karke dobara login kar."
                     }
                 )
+            } finally {
+                signingOut = false
             }
         }
     }
 
-    private suspend fun loadProfile() {
-        val userId = auth.userId.value
-        if (userId == null) {
-            _state.value = AuthUiState(loading = false)
-            return
-        }
+    private suspend fun loadProfile(userId: String) {
         val token = auth.accessToken(userId)
         try {
-            val profile = RideFixBroClient.api.me("Bearer $token")
+            val profile = api.me("Bearer $token")
+            currentCoroutineContext().ensureActive()
             check(profile.supabaseUserId == userId) { "The API returned a different account." }
-            if (auth.userId.value == userId) {
-                _state.value = AuthUiState(loading = false, signedIn = true, profile = profile)
-            }
+            if (signingOut) return
+            // collectLatest purane account ki pending profile request cancel kar deta hai.
+            _state.value = AuthUiState(loading = false, signedIn = true, profile = profile)
         } catch (error: HttpException) {
-            if (error.code() == 401) auth.invalidateSession(userId)
+            if (error.code() == 401) auth.invalidateSession(userId, token)
             throw error
         }
     }
@@ -105,16 +150,21 @@ class AuthViewModel(private val auth: AuthRepository) : ViewModel() {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                val message = when (error) {
-                    is GetCredentialCancellationException -> null
-                    is AuthSetupException -> "Auth setup missing hai: local.properties mein SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY aur GOOGLE_WEB_CLIENT_ID set kar."
-                    is NoCredentialException -> "Google account select nahi hua. Device ka Google account aur Play Services check kar."
-                    is LoginRequiredException -> "Session expire ho gaya. Google se dobara sign in kar."
-                    is HttpException -> "API account verify nahi kar paayi (${error.code()}). Retry kar."
-                    else -> "Sign-in complete nahi hua. Network/configuration check karke retry kar."
-                }
-                _state.value = AuthUiState(loading = false, signedIn = auth.userId.value != null, error = message)
+                showError(error)
             }
         }
+    }
+
+    private fun showError(error: Exception) {
+        val message = when (error) {
+            is GetCredentialCancellationException -> null
+            is AuthSetupException -> "Auth setup missing hai: local.properties mein SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY aur GOOGLE_WEB_CLIENT_ID set kar."
+            is NoCredentialException -> "Google account select nahi hua. Device ka Google account aur Play Services check kar."
+            is LoginRequiredException -> "Session expire ho gaya. Google se dobara sign in kar."
+            is SessionNotReadyException -> "Session restore/refresh chal raha hai. Internet check karke retry kar."
+            is HttpException -> "API account verify nahi kar paayi (${error.code()}). Retry kar."
+            else -> "Sign-in complete nahi hua. Network/configuration check karke retry kar."
+        }
+        _state.value = _state.value.copy(loading = false, error = message)
     }
 }

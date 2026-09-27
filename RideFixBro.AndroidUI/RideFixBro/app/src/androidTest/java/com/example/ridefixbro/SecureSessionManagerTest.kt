@@ -16,6 +16,18 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class SecureSessionManagerTest {
     @Test
+    fun corruptStoredSessionDoesNotCrashAutomaticRestore() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val manager = SecureSessionManager(context)
+        try {
+            File(context.noBackupFilesDir, "supabase-session").writeText("invalid-session")
+            assertNull(manager.loadSession())
+        } finally {
+            manager.deleteSession()
+        }
+    }
+
+    @Test
     fun sessionSurvivesReloadWithoutPlaintextTokensAndCanBeDeleted() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val manager = SecureSessionManager(context)
@@ -33,6 +45,7 @@ class SecureSessionManagerTest {
             val reloaded = SecureSessionManager(context).loadSession()
             assertEquals(session.accessToken, reloaded?.accessToken)
             assertEquals(session.refreshToken, reloaded?.refreshToken)
+            assertEquals(session.expiresAt, reloaded?.expiresAt)
             manager.deleteSession()
             assertNull(manager.loadSession())
         } finally {
