@@ -12,11 +12,9 @@ if (localPropertiesFile.exists()) {
 }
 
 // local.properties mein ye PUBLIC values rakhna:
-// SUPABASE_URL=https://PROJECT.supabase.co (without /auth/v1)
-// SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
-// GOOGLE_WEB_CLIENT_ID=...apps.googleusercontent.com (Web client, Android client ID nahi)
-// Google provider enable karo; Android OAuth client mein package name + signing SHA-1 register karo.
-// Google client secret sirf Supabase dashboard mein; service-role/JWT secret app mein kabhi nahi.
+// SUPABASE_URL
+// SUPABASE_PUBLISHABLE_KEY
+// GOOGLE_WEB_CLIENT_ID
 fun publicConfig(name: String): String {
     val value = providers.environmentVariable(name).orNull ?: localProperties.getProperty(name, "")
     return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
