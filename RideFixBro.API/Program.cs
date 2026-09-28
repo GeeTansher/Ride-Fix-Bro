@@ -83,7 +83,17 @@ builder.Services.AddDbContext<RideFixBroDbContext>(options =>
 	{
 		throw new InvalidOperationException("Set ConnectionStrings:DefaultConnection in User Secrets or Azure configuration.");
 	}
-	options.UseSqlServer(connectionString);
+	options.UseSqlServer(
+		builder.Configuration.GetConnectionString("DefaultConnection"),
+		sqlOptions =>
+		{
+			// Ye line EF Core ko bolegi: "Bhai DB so raha hai toh thodi der try karta reh, turant error mat phek"
+			sqlOptions.EnableRetryOnFailure(
+				maxRetryCount: 5, // 5 baar retry karega fail hone pe
+				maxRetryDelay: TimeSpan.FromSeconds(30), // Retries ke beech max wait time
+				errorNumbersToAdd: null
+			);
+		});
 });
 
 var app = builder.Build();
