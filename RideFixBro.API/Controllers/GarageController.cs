@@ -42,5 +42,16 @@ namespace RideFixBro.API.Controllers
 			}
 			return CreatedAtAction(nameof(Get), result.Bike);
 		}
+
+		[HttpDelete("{id:int:min(1)}")]
+		public async Task<IActionResult> Delete(int id, CancellationToken cancellationToken)
+		{
+			var userId = int.Parse(User.FindFirstValue("app_user_id")!, CultureInfo.InvariantCulture);
+			if (!await _garage.DeleteAsync(userId, id, cancellationToken))
+			{
+				return NotFound(new { Error = "Bhai, ye bike teri garage mein nahi mili." });
+			}
+			return NoContent();
+		}
 	}
 }

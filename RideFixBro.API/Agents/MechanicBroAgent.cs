@@ -40,11 +40,11 @@ namespace RideFixBro.API.Agents
 
 					TOOLS USE KARNE KE STRICT RULES: 
 					1. INTERNET SEARCH: Agar tujhe kisi gear, tyre, helmet ya parts ka LATEST price, reviews ya current info chahiye, toh chup-chaap 'SearchInternetAsync' tool call kar lena. Hawa me teer mat marna aur fake price mat batana.
-					2. BIKE MANUAL & TECHNICALS: Agar bike ki exact repair steps, torque specs, chain ya technical details (jaise spark plug badalna) chahiye toh chup-chaap 'SearchManualAsync' tool call kar. Hawa me teer mat marna.
+					2. BIKE MANUAL & TECHNICALS: Agar bike ki exact repair steps, torque specs, chain ya technical details (jaise spark plug badalna) chahiye aur is chat mein 'SearchManualAsync' tool available hai, toh use call kar. Tool available nahi hai toh manual consult karne ka claim mat karna. General chat mein manual-backed ya bike-specific details guaranteed nahi hain; exact specifications ke liye applicable manual chahiye. Hawa me teer mat marna.
 
 					STRICT INSTRUCTIONS:
 					1. Agar user ne koi photo bheji hai, toh usko dhyan se dekh aur diagnose kar.
-					2. Agar tool/manual ki info mein answer nahi hai, toh apni general motorcycle knowledge use kar, par user ko bata dena ki 'Bhai, manual mein exact likha nahi hai, par experience se bata raha hoon...'
+					2. Agar verified info nahi mili, toh general knowledge ko clearly general guidance kehna. 'Manual mein exact likha nahi hai' sirf tab kehna jab manual actually consult kiya ho.
 					3. Faltu me zabardasti bike ka technical gyaan mat pelna agar poocha na jaye. Exact point pe baat kar.
 					4. Agar user sirf 'Hi', 'Hello', 'Kaise ho' bol raha hai, ya kisi general topic (jaise trips ya riding jackets ki casual baat) pe baat kar raha hai, toh kisi tool ko call mat karna. Bas ek normal cool dost ki tarah apni general knowledge se direct reply karna."
 			);
@@ -90,18 +90,18 @@ namespace RideFixBro.API.Agents
 		// Ye apne middleware ka switch hai, Gemini API ka parameter nahi.
 		public bool ExecuteTools { get; init; } = true;
 		public int RemainingToolCalls { get; init; } = int.MaxValue;
+		public bool AllowManualSearch { get; init; } = true;
 	}
 
 	internal sealed class MechanicToolMiddleware : IMiddleware
 	{
-		private readonly FunctionCallMiddleware _describe;
+		private readonly FunctionContract[] _contracts;
 		private readonly IDictionary<string, Func<string, CancellationToken, Task<string>>> _tools;
 
 		public MechanicToolMiddleware(IEnumerable<FunctionContract> functions,
 			IDictionary<string, Func<string, CancellationToken, Task<string>>> functionMap)
 		{
-			var contracts = functions.ToArray();
-			_describe = new FunctionCallMiddleware(contracts);
+			_contracts = functions.ToArray();
 			_tools = functionMap;
 		}
 
@@ -112,10 +112,12 @@ namespace RideFixBro.API.Agents
 		{
 			var executeTools = true;
 			var remaining = int.MaxValue;
+			var allowManual = true;
 			if (context.Options is MechanicReplyOptions options)
 			{
 				executeTools = options.ExecuteTools;
 				remaining = options.RemainingToolCalls;
+				allowManual = options.AllowManualSearch;
 			}
 
 			// Pehle se tool request di ho toh model ko dobara bulane ki zarurat nahi.
@@ -125,19 +127,22 @@ namespace RideFixBro.API.Agents
 				{
 					return pendingCall;
 				}
-				ValidateToolRequest(pendingCall, remaining);
+				ValidateToolRequest(pendingCall, remaining, allowManual);
 				return await ExecuteToolsAsync(pendingCall, agent, cancellationToken);
 			}
 
 			// 1. Gemini ka reply lo. Abhi tools execute nahi hue hain.
-			var reply = await _describe.InvokeAsync(context, agent, cancellationToken);
+			var available = _contracts.Where(contract =>
+				allowManual || contract.Name != nameof(VectorDbService.SearchManualAsync));
+			var describe = new FunctionCallMiddleware(available);
+			var reply = await describe.InvokeAsync(context, agent, cancellationToken);
 			if (reply is not ToolCallMessage call || !executeTools)
 			{
 				return reply;
 			}
 
 			// 2. Poora batch check karo, phir 3. tools chalao.
-			ValidateToolRequest(call, remaining);
+			ValidateToolRequest(call, remaining, allowManual);
 			var result = await ExecuteToolsAsync(call, agent, cancellationToken);
 			if (result is not ToolCallResultMessage toolResult)
 			{
@@ -158,7 +163,7 @@ namespace RideFixBro.API.Agents
 			return executor.InvokeAsync(new MiddlewareContext(new IMessage[] { call }, null), agent, cancellationToken);
 		}
 
-		private void ValidateToolRequest(ToolCallMessage call, int remaining)
+		private void ValidateToolRequest(ToolCallMessage call, int remaining, bool allowManual)
 		{
 			if (call.ToolCalls.Count() > remaining)
 			{
@@ -166,6 +171,10 @@ namespace RideFixBro.API.Agents
 			}
 			foreach (var tool in call.ToolCalls)
 			{
+				if (!allowManual && tool.FunctionName == nameof(VectorDbService.SearchManualAsync))
+				{
+					throw new ChatLimitExceededException("Bhai, selected bike ka verified manual abhi available nahi hai.");
+				}
 				if (!_tools.ContainsKey(tool.FunctionName))
 				{
 					throw new InvalidOperationException($"Tool '{tool.FunctionName}' is not registered.");

@@ -1,6 +1,7 @@
 ﻿using AutoGen.Core;
 using RideFixBro.API.DataStore.Interfaces;
 using System.Collections.Concurrent;
+using RideFixBro.API.Services;
 
 namespace RideFixBro.API.DataStore
 {
@@ -14,8 +15,18 @@ namespace RideFixBro.API.DataStore
 			return _store.TryGetValue(sessionId, out var session) ? session.Messages.ToList() : [];
 		}
 
+		public int? GetSelectedBikeId(string sessionId)
+		{
+			return _store.TryGetValue(sessionId, out var session) && session.BikeId > 0 ? session.BikeId : null;
+		}
+
+		public bool IsGeneralSession(string sessionId)
+		{
+			return _store.TryGetValue(sessionId, out var session) && session.IsGeneral;
+		}
+
 		public async Task<T> UpdateHistoryAsync<T>(string sessionId, Func<List<IMessage>, Task<T>> update,
-			CancellationToken cancellationToken = default)
+			CancellationToken cancellationToken = default, int? userBikeId = null, bool isGeneral = false)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
 			var session = _store.GetOrAdd(sessionId, _ => new SessionHistory());
@@ -23,6 +34,15 @@ namespace RideFixBro.API.DataStore
 			await session.Gate.WaitAsync(cancellationToken);
 			try
 			{
+				var requestedBike = userBikeId ?? 0;
+				if (session.BikeId != -1 &&
+					(session.BikeId != requestedBike || session.IsGeneral != isGeneral))
+				{
+					throw new ChatInputException("Bhai, is chat ki selection locked hai. Change karne ke liye New Chat kholo.", 409);
+				}
+				// First accepted attempt General/bike selection lock karta hai, chahe model reply fail ho.
+				session.IsGeneral = isGeneral;
+				session.BikeId = requestedBike;
 				// List ki copy pe kaam kar: beech mein error aaye toh saved history ko chhedna nahi.
 				// Message objects shared hain, isliye purane tool calls ko mutate nahi karte.
 				var history = session.Messages.ToList();
@@ -41,6 +61,8 @@ namespace RideFixBro.API.DataStore
 		{
 			public SemaphoreSlim Gate { get; } = new(1, 1);
 			public volatile IMessage[] Messages = [];
+			public volatile int BikeId = -1;
+			public volatile bool IsGeneral;
 		}
 	}
 }

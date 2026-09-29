@@ -2,6 +2,7 @@ using AutoGen.Core;
 using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore.Interfaces;
+using RideFixBro.API.Models;
 
 namespace RideFixBro.API.Services
 {
@@ -15,7 +16,8 @@ namespace RideFixBro.API.Services
 		private readonly ChatInputValidator _inputValidator = inputValidator;
 
         public async Task<string> AskMechanicBro(Guid userId, string sessionId, string userMessage,
-			string? base64Image = null, CancellationToken cancellationToken = default)
+			string? base64Image = null, CancellationToken cancellationToken = default,
+			GarageBikeResponse? selectedBike = null, bool isGeneral = false)
 		{
 			try
 			{
@@ -24,12 +26,25 @@ namespace RideFixBro.API.Services
 					throw new ArgumentException("An authenticated user ID is required.", nameof(userId));
 				}
 				var dataUri = _inputValidator.Validate(sessionId, userMessage, base64Image);
-				IMessage messageToSend = new TextMessage(Role.User, userMessage);
+				if (isGeneral && selectedBike is not null)
+				{
+					throw new ChatInputException("General aur bike dono select nahi ho sakte.");
+				}
+				var messageText = userMessage;
+				if (isGeneral)
+				{
+					messageText += "\n\n[General chat: no motorcycle is selected. Manual-backed or bike-specific details are not guaranteed. Do not claim to have consulted a bike manual. Ask the user to start a bike-specific chat for applicable manual information.]";
+				}
+				else if (selectedBike is not null)
+				{
+					messageText += $"\n\n[App-selected motorcycle: {selectedBike.Make} {selectedBike.Model}, year {selectedBike.Year}. Do not substitute another bike's specifications. Retrieved manual passages must confirm applicability before presenting model-year-specific specifications.]";
+				}
+				IMessage messageToSend = new TextMessage(Role.User, messageText);
 				if (dataUri is not null)
 				{
 					messageToSend = new MultiModalMessage(Role.User,
 					[
-						new TextMessage(Role.User, userMessage),
+						new TextMessage(Role.User, messageText),
 						new ImageMessage(Role.User, dataUri)
 					]);
 				}
@@ -49,7 +64,11 @@ namespace RideFixBro.API.Services
 							new MechanicReplyOptions
 							{
 								ExecuteTools = round < _limits.MaxToolRounds,
-								RemainingToolCalls = _limits.MaxToolCallsPerRequest - toolCallsExecuted
+								RemainingToolCalls = _limits.MaxToolCallsPerRequest - toolCallsExecuted,
+								// Filhaal indexed manual X440 ki hai; doosri bike par wahi specs mat bhejo.
+								AllowManualSearch = !isGeneral && (selectedBike is null ||
+									(selectedBike.Make.Equals("Harley-Davidson", StringComparison.OrdinalIgnoreCase) &&
+									 selectedBike.Model.Equals("X440", StringComparison.OrdinalIgnoreCase)))
 							},
 							cancellationToken);
 
@@ -78,7 +97,7 @@ namespace RideFixBro.API.Services
 						// Request + results saath rakh; agli iteration mein Gemini inhe padhke aage bolega.
 						history.Add(toolReply);
 					}
-				}, cancellationToken);
+				}, cancellationToken, selectedBike?.Id, isGeneral);
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{

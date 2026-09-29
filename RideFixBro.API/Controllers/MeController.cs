@@ -17,6 +17,7 @@ namespace RideFixBro.API.Controllers
 				Id = int.Parse(User.FindFirstValue("app_user_id")!, System.Globalization.CultureInfo.InvariantCulture),
 				SupabaseUserId = User.FindFirstValue("sub"),
 				Email = User.FindFirstValue("email"),
+				Name = User.FindFirstValue("display_name"),
 				Role = User.FindFirstValue(ClaimTypes.Role)
 			});
 		}
