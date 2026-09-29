@@ -322,10 +322,10 @@ namespace RideFixBro.API.Tests
 			[
 				Contract("SearchInternetAsync", "query"),
 				Contract("SearchManualAsync", "userQuery")
-			], new Dictionary<string, Func<string, Task<string>>>
+			], new Dictionary<string, Func<string, CancellationToken, Task<string>>>
 			{
-				["SearchInternetAsync"] = internet ?? (_ => Task.FromResult("Internet result")),
-				["SearchManualAsync"] = manual ?? (_ => Task.FromResult("Manual result"))
+				["SearchInternetAsync"] = (args, _) => internet is null ? Task.FromResult("Internet result") : internet(args),
+				["SearchManualAsync"] = (args, _) => manual is null ? Task.FromResult("Manual result") : manual(args)
 			});
 
 		private static FunctionContract Contract(string name, string parameter) => new()

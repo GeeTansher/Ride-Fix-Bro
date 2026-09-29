@@ -15,15 +15,17 @@ namespace RideFixBro.API.Agents
 			// Generated wrapper JSON arguments ko method ke parameters mein badalta hai.
 			return Create(chatClient,
 				[tavilyService.SearchInternetAsyncFunctionContract, vectorDbService.SearchManualAsyncFunctionContract],
-				new Dictionary<string, Func<string, Task<string>>>
+				new Dictionary<string, Func<string, CancellationToken, Task<string>>>
 				{
-					[nameof(TavilySearchService.SearchInternetAsync)] = tavilyService.SearchInternetAsyncWrapper,
-					[nameof(VectorDbService.SearchManualAsync)] = vectorDbService.SearchManualAsyncWrapper
+					[nameof(TavilySearchService.SearchInternetAsync)] = (args, token) =>
+						tavilyService.SearchInternetAsync(ReadQuery(args, "query"), token),
+					[nameof(VectorDbService.SearchManualAsync)] = (args, token) =>
+						vectorDbService.SearchManualAsync(ReadQuery(args, "userQuery"), token)
 				});
 		}
 
 		internal static IAgent Create(ChatClient chatClient, IEnumerable<FunctionContract> functions,
-			IDictionary<string, Func<string, Task<string>>> functionMap)
+			IDictionary<string, Func<string, CancellationToken, Task<string>>> functionMap)
 		{
 			// Setup ek hi hai; tests bhi isi pipeline mein apne fake tools laga sakte hain.
 			var safeFunctionMap = functionMap.ToDictionary(entry => entry.Key,
@@ -51,16 +53,28 @@ namespace RideFixBro.API.Agents
 			return openAIAgent.RegisterMiddleware(new GeminiMessageConnector()).RegisterMiddleware(toolMiddleware);
 		}
 
-		private static Func<string, Task<string>> WrapToolResult(string name, Func<string, Task<string>> execute)
+		private static string ReadQuery(string arguments, string parameterName)
 		{
-			return async arguments =>
+			using var document = JsonDocument.Parse(arguments);
+			if (!document.RootElement.TryGetProperty(parameterName, out var query) || query.ValueKind != JsonValueKind.String)
+			{
+				throw new JsonException($"Tool argument '{parameterName}' must be a string.");
+			}
+			return query.GetString()!;
+		}
+
+		private static Func<string, CancellationToken, Task<string>> WrapToolResult(
+			string name, Func<string, CancellationToken, Task<string>> execute)
+		{
+			return async (arguments, cancellationToken) =>
 			{
 				using var document = JsonDocument.Parse(arguments);
 				if (document.RootElement.ValueKind != JsonValueKind.Object)
 				{
 					throw new JsonException($"Tool '{name}' arguments must be a JSON object.");
 				}
-				var result = await execute(arguments);
+				cancellationToken.ThrowIfCancellationRequested();
+				var result = await execute(arguments, cancellationToken);
 				if (string.IsNullOrWhiteSpace(result))
 				{
 					throw new InvalidOperationException($"Tool '{name}' returned an empty result.");
@@ -80,15 +94,13 @@ namespace RideFixBro.API.Agents
 
 	internal sealed class MechanicToolMiddleware : IMiddleware
 	{
-		private readonly FunctionCallMiddleware _execute;
 		private readonly FunctionCallMiddleware _describe;
-		private readonly IDictionary<string, Func<string, Task<string>>> _tools;
+		private readonly IDictionary<string, Func<string, CancellationToken, Task<string>>> _tools;
 
 		public MechanicToolMiddleware(IEnumerable<FunctionContract> functions,
-			IDictionary<string, Func<string, Task<string>>> functionMap)
+			IDictionary<string, Func<string, CancellationToken, Task<string>>> functionMap)
 		{
 			var contracts = functions.ToArray();
-			_execute = new FunctionCallMiddleware(contracts, functionMap);
 			_describe = new FunctionCallMiddleware(contracts);
 			_tools = functionMap;
 		}
@@ -114,7 +126,7 @@ namespace RideFixBro.API.Agents
 					return pendingCall;
 				}
 				ValidateToolRequest(pendingCall, remaining);
-				return await _execute.InvokeAsync(context, agent, cancellationToken);
+				return await ExecuteToolsAsync(pendingCall, agent, cancellationToken);
 			}
 
 			// 1. Gemini ka reply lo. Abhi tools execute nahi hue hain.
@@ -126,13 +138,24 @@ namespace RideFixBro.API.Agents
 
 			// 2. Poora batch check karo, phir 3. tools chalao.
 			ValidateToolRequest(call, remaining);
-			var executionContext = new MiddlewareContext(new IMessage[] { call }, context.Options);
-			var result = await _execute.InvokeAsync(executionContext, agent, cancellationToken);
+			var result = await ExecuteToolsAsync(call, agent, cancellationToken);
 			if (result is not ToolCallResultMessage toolResult)
 			{
 				throw new InvalidOperationException("Tool execution did not return a result message.");
 			}
 			return new ToolCallAggregateMessage(call, toolResult, from: agent.Name);
+		}
+
+		private Task<IMessage> ExecuteToolsAsync(ToolCallMessage call, IAgent agent, CancellationToken cancellationToken)
+		{
+			// AutoGen map mein CancellationToken parameter nahi hai; current request ka token capture karo.
+			var functions = new Dictionary<string, Func<string, Task<string>>>();
+			foreach (var tool in _tools)
+			{
+				functions[tool.Key] = arguments => tool.Value(arguments, cancellationToken);
+			}
+			var executor = new FunctionCallMiddleware(functionMap: functions);
+			return executor.InvokeAsync(new MiddlewareContext(new IMessage[] { call }, null), agent, cancellationToken);
 		}
 
 		private void ValidateToolRequest(ToolCallMessage call, int remaining)

@@ -111,23 +111,79 @@ class SessionLifecycleTest {
 
         statuses.value = SessionStatus.Initializing
         runCurrent()
-        assertNull(login.state.value.profile)
+        assertEquals("user-a", login.state.value.profile?.supabaseUserId)
+        assertFalse(login.state.value.sessionReady)
         assertEquals(history, chat.messages.value)
 
         statuses.value = SessionStatus.RefreshFailure(RefreshFailureCause.NetworkError(IOException("Offline")))
         runCurrent()
         assertFalse(login.state.value.loading)
         assertTrue(login.state.value.signedIn)
+        assertEquals("user-a", login.state.value.profile?.supabaseUserId)
         assertNotNull(login.state.value.error)
         assertEquals(history, chat.messages.value)
 
         statuses.value = authenticated("user-a", "refreshed-token")
         runCurrent()
         assertEquals("user-a", login.state.value.profile?.supabaseUserId)
+        assertTrue(login.state.value.sessionReady)
         assertEquals(history, chat.messages.value)
         statuses.value = SessionStatus.NotAuthenticated(true)
         runCurrent()
         assertTrue(chat.messages.value.isEmpty())
+    }
+
+    @Test
+    fun draftAndCameraResultSurviveBackgroundButNeverCarryToAnotherAccount() = runTest(dispatcher) {
+        val login = keep(AuthViewModel(auth, api))
+        val chat = keep(ChatViewModel(auth, api))
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        chat.updateDraftText("Photo wala question")
+        statuses.value = SessionStatus.Initializing
+        runCurrent()
+        chat.attachPhoto("user-a", "camera-result")
+        assertEquals("Photo wala question", chat.draft.value.text)
+        assertEquals("camera-result", chat.draft.value.imageData)
+        assertEquals("user-a", login.state.value.profile?.supabaseUserId)
+        assertFalse(login.state.value.sessionReady)
+        chat.sendDraft()
+        runCurrent()
+        coVerify(exactly = 0) { api.askMechanicBro(any(), any()) }
+
+        statuses.value = authenticated("user-a", "new-token")
+        runCurrent()
+        assertTrue(login.state.value.sessionReady)
+        assertEquals("camera-result", chat.draft.value.imageData)
+        statuses.value = authenticated("user-b")
+        runCurrent()
+        assertEquals("", chat.draft.value.text)
+        assertNull(chat.draft.value.imageData)
+        chat.attachPhoto("user-a", "late-camera-result")
+        assertNull(chat.draft.value.imageData)
+        chat.updateDraftText("User B draft")
+        statuses.value = SessionStatus.NotAuthenticated(true)
+        runCurrent()
+        assertEquals("", chat.draft.value.text)
+    }
+
+    @Test
+    fun reconnectingProfileFailureKeepsDraftAndDisablesSendingUntilVerified() = runTest(dispatcher) {
+        val login = keep(AuthViewModel(auth, api))
+        val chat = keep(ChatViewModel(auth, api))
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        chat.updateDraftText("Keep this")
+        statuses.value = SessionStatus.Initializing
+        runCurrent()
+        coEvery { api.me(any()) } throws IOException("Offline")
+        statuses.value = authenticated("user-a", "new-token")
+        runCurrent()
+        assertEquals("user-a", login.state.value.profile?.supabaseUserId)
+        assertFalse(login.state.value.sessionReady)
+        assertFalse(login.state.value.loading)
+        assertNotNull(login.state.value.error)
+        assertEquals("Keep this", chat.draft.value.text)
     }
 
     @Test

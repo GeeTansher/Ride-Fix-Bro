@@ -2,6 +2,8 @@
 using AutoGen.OpenAI;
 using OpenAI;
 using System.ClientModel;
+using System.ClientModel.Primitives;
+using RideFixBro.API.Configuration;
 
 namespace RideFixBro.API.Agents
 {
@@ -13,7 +15,12 @@ namespace RideFixBro.API.Agents
 			// OpenAI client banaya par URL Gemini ka daal diya!
 			var openAIClient = new OpenAIClient(
 				new ApiKeyCredential(apiKey),
-				new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") }
+				new OpenAIClientOptions
+				{
+					Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/"),
+					NetworkTimeout = TimeSpan.FromSeconds(ApiTimeouts.Seconds),
+					RetryPolicy = new ClientRetryPolicy(0)
+				}
 			);
 			
 			return openAIClient;

@@ -1,6 +1,8 @@
 using AutoGen.Core;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using OpenAI.Chat;
 using RideFixBro.API.Agents;
 using RideFixBro.API.Authentication;
@@ -13,6 +15,7 @@ using RideFixBro.Data.Entities;
 using Scalar.AspNetCore;
 using System.Globalization;
 using System.Threading.RateLimiting;
+using System.Data.Common;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,6 +30,7 @@ builder.Services.AddSingleton(chatLimits);
 builder.Services.AddSingleton<ChatInputValidator>();
 builder.Services.AddSupabaseAuthentication(builder.Configuration);
 builder.Services.AddScoped<AppUserService>();
+builder.Services.AddScoped<GarageService>();
 // free tier h to concurrent requests limit lagana padega; nahi toh Gemini ke free tier me 429 aa jayega, else anyone sponser!!
 builder.Services.AddSingleton<SemaphoreSlim>(_ =>
 	new SemaphoreSlim(chatLimits.MaxConcurrentRequests, chatLimits.MaxConcurrentRequests));
@@ -66,7 +70,7 @@ builder.Services.AddSingleton<ChatClient>(services =>
 		?? throw new InvalidOperationException("Gemini API key is missing.");
 	return OpenAIClientBuilder.Create(apiKey).GetChatClient("gemini-3.1-flash-lite");
 });
-builder.Services.AddHttpClient<TavilySearchService>(client => client.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddHttpClient<TavilySearchService>(client => client.Timeout = TimeSpan.FromSeconds(ApiTimeouts.Seconds));
 builder.Services.AddScoped<IAgent>(services => MechanicBroAgent.Create(
 	services.GetRequiredService<ChatClient>(),
 	services.GetRequiredService<TavilySearchService>(),
@@ -83,14 +87,20 @@ builder.Services.AddDbContext<RideFixBroDbContext>(options =>
 	{
 		throw new InvalidOperationException("Set ConnectionStrings:DefaultConnection in User Secrets or Azure configuration.");
 	}
+	var sqlConnection = new SqlConnectionStringBuilder(connectionString)
+	{
+		ConnectTimeout = ApiTimeouts.Seconds,
+		ConnectRetryCount = 0
+	};
 	options.UseSqlServer(
-		builder.Configuration.GetConnectionString("DefaultConnection"),
+		sqlConnection.ConnectionString,
 		sqlOptions =>
 		{
-			// Ye line EF Core ko bolegi: "Bhai DB so raha hai toh thodi der try karta reh, turant error mat phek"
+			sqlOptions.CommandTimeout(ApiTimeouts.Seconds);
+			// Short retries sirf transient SQL errors ke liye; caller cancel kare toh query bhi rukegi.
 			sqlOptions.EnableRetryOnFailure(
-				maxRetryCount: 5, // 5 baar retry karega fail hone pe
-				maxRetryDelay: TimeSpan.FromSeconds(30), // Retries ke beech max wait time
+				maxRetryCount: 2,
+				maxRetryDelay: TimeSpan.FromSeconds(3),
 				errorNumbersToAdd: null
 			);
 		});
@@ -120,6 +130,17 @@ app.Use(async (context, next) =>
 		await context.Response.WriteAsJsonAsync(new
 		{
 			Error = "Bhai, account database abhi available nahi hai. Thodi der baad retry kar."
+		}, context.RequestAborted);
+	}
+	catch (Exception ex) when (
+		(ex is DbException || ex is DbUpdateException || ex is RetryLimitExceededException) &&
+		!context.Response.HasStarted)
+	{
+		app.Logger.LogError(ex, "Database operation failed.");
+		context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+		await context.Response.WriteAsJsonAsync(new
+		{
+			Error = "Bhai, database abhi available nahi hai. Thodi der baad retry kar."
 		}, context.RequestAborted);
 	}
 });

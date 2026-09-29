@@ -18,19 +18,24 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.io.InterruptedIOException
 
 // Ye data class UI pe message dikhane ke kaam aayegi
 data class ChatMessage(val text: String, val isUser: Boolean)
+data class ChatDraft(val text: String = "", val imageData: String? = null)
 
 class ChatViewModel(
     private val auth: AuthRepository,
-    private val api: RideFixApiInterface = RideFixBroClient.api
+    private val api: RideFixApiInterface = RideFixBroClient.chatApi
 ) : ViewModel() {
 
     private var sessionId = UUID.randomUUID().toString()
     private var activeUserId: String? = null
     private var sendJob: Job? = null
     private var sendGeneration = 0
+    private var sessionReady = false
+    private val _draft = MutableStateFlow(ChatDraft())
+    val draft = _draft.asStateFlow()
 
     // Jo messages hum UI (Compose) ko dikhayenge
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -45,11 +50,18 @@ class ChatViewModel(
             try {
                 auth.sessionStatus.collect { status ->
                     when (status) {
-                        is SessionStatus.Authenticated -> changeAccount(status.session.user?.id)
-                        is SessionStatus.NotAuthenticated -> changeAccount(null)
+                        is SessionStatus.Authenticated -> {
+                            changeAccount(status.session.user?.id)
+                            sessionReady = true
+                        }
+                        is SessionStatus.NotAuthenticated -> {
+                            sessionReady = false
+                            changeAccount(null)
+                        }
                         else -> {
                             // Background/temporary refresh failure logout nahi hai. Chat history rakho.
                             sendJob?.cancel()
+                            sessionReady = false
                             _isLoading.value = false
                         }
                     }
@@ -59,6 +71,7 @@ class ChatViewModel(
             } catch (error: Exception) {
                 // Auth screen setup/restore error dikhayegi; chat kisi purane account par nahi chalegi.
                 changeAccount(null)
+                sessionReady = false
             }
         }
     }
@@ -69,12 +82,28 @@ class ChatViewModel(
         activeUserId = userId
         sessionId = UUID.randomUUID().toString()
         _messages.value = emptyList()
+        _draft.value = ChatDraft()
         _isLoading.value = false
+    }
+
+    fun updateDraftText(text: String) {
+        _draft.value = _draft.value.copy(text = text)
+    }
+
+    fun attachPhoto(userId: String, imageData: String?) {
+        if (activeUserId == userId) {
+            _draft.value = _draft.value.copy(imageData = imageData)
+        }
+    }
+
+    fun sendDraft() {
+        sendMessage(_draft.value.text, _draft.value.imageData)
     }
 
     fun sendMessage(text: String, base64Image: String? = null) {
         val userId = activeUserId ?: return
-        if (_isLoading.value || text.isBlank()) return
+        if (!sessionReady || _isLoading.value || text.isBlank()) return
+        _draft.value = ChatDraft()
         // 1. User ka message list mein daalo aur UI update karo
         val currentList = _messages.value.toMutableList()
         currentList.add(ChatMessage(text = text, isUser = true))
@@ -108,7 +137,9 @@ class ChatViewModel(
                 if (activeUserId != userId || sendGeneration != requestGeneration) return@launch
                 // Agar server band hua ya net gaya
                 val errorList = _messages.value.toMutableList()
-                val errorText = if (e is SessionNotReadyException) {
+                val errorText = if (e is InterruptedIOException) {
+                    "Response ka wait time khatam ho gaya. Dobara try kar."
+                } else if (e is SessionNotReadyException) {
                     "Session refresh chal raha hai. Thodi der mein retry kar."
                 } else when ((e as? HttpException)?.code()) {
                     400 -> "Message ya image valid nahi hai. Chhota message/valid photo bhej."
@@ -116,6 +147,7 @@ class ChatViewModel(
                     422 -> "Tool budget khatam ho gaya. Sawal thoda chhota kar."
                     429 -> "Abhi requests ki limit aa gayi. Thoda ruk ke retry kar."
                     503 -> "Account database abhi available nahi hai. Baad mein retry kar."
+                    504 -> "Server ka response time par nahi aaya. Dobara try kar."
                     else -> "Answer nahi aa paaya. Network check karke retry kar."
                 }
                 errorList.add(ChatMessage(text = "Bhai, $errorText", isUser = false))

@@ -65,6 +65,7 @@ namespace RideFixBro.API.Services
 			}
 			catch (Exception ex)
 			{
+				cancellationToken.ThrowIfCancellationRequested();
 				_logger.LogError(ex, "Could not load the application user.");
 				throw new UserStoreUnavailableException(ex);
 			}

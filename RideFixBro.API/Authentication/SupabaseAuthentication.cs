@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using RideFixBro.API.Configuration;
 
 namespace RideFixBro.API.Authentication
 {
@@ -27,6 +28,7 @@ namespace RideFixBro.API.Authentication
 					options.Authority = issuer;
 					options.Audience = audience;
 					options.RequireHttpsMetadata = true;
+					options.BackchannelTimeout = TimeSpan.FromSeconds(ApiTimeouts.Seconds);
 					options.MapInboundClaims = false;
 					options.SaveToken = false;
 					options.IncludeErrorDetails = false;

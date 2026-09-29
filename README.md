@@ -111,7 +111,7 @@ Key Vault configuration, or authentication settings.
 **Frontend (The Face):**
 * **Framework:** Kotlin + Jetpack Compose (Modern Android UI)
 * **Architecture:** MVVM (Model-View-ViewModel)
-* **Networking:** Retrofit with OkHttp (Configured with 60s timeouts for Azure cold-starts)
+* **Networking:** Retrofit with OkHttp (120-second chat response timeout; 45-second timeout for other API calls)
 * **Features:** Multimodal Vision (Camera/Gallery uploads), Markdown rendering.
 
 ## 🧠 How It Works (The Architecture)

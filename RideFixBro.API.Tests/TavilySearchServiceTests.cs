@@ -41,5 +41,31 @@ namespace RideFixBro.API.Tests
 			await Assert.ThrowsAsync<ArgumentException>(() => service.SearchInternetAsync(query));
 			Assert.Empty(handler.Requests);
 		}
+
+		[Fact]
+		public async Task RequestCancellationStopsTheInternetHttpCall()
+		{
+			using var handler = new WaitingHandler();
+			using var client = new HttpClient(handler);
+			var service = new TavilySearchService(ToolFlowTests.Configuration(), client);
+			using var cancellation = new CancellationTokenSource();
+			var search = service.SearchInternetAsync("search", cancellation.Token);
+			await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			cancellation.Cancel();
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search.WaitAsync(TimeSpan.FromSeconds(5)));
+		}
+
+		private sealed class WaitingHandler : HttpMessageHandler
+		{
+			public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+			protected override async Task<HttpResponseMessage> SendAsync(
+				HttpRequestMessage request, CancellationToken cancellationToken)
+			{
+				Started.TrySetResult();
+				await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+				throw new InvalidOperationException("The request should have been cancelled.");
+			}
+		}
 	}
 }

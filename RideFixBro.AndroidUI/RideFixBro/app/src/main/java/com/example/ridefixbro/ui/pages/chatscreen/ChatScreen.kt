@@ -27,20 +27,17 @@ import com.example.ridefixbro.viewmodel.ChatMessage
 import com.mikepenz.markdown.m3.Markdown
 
 @Composable
-fun ChatScreen(viewModel: ChatViewModel) {
+fun ChatScreen(viewModel: ChatViewModel, userId: String, enabled: Boolean) {
     // ViewModel se data observe kar rahe hain. Data change hoga, UI automatically update hoga!
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
-    var inputText by remember { mutableStateOf("") }
-
-    // Captured image ko temporarily save karne ke liye
-    var capturedImage by remember { mutableStateOf<Bitmap?>(null) }
+    val draft by viewModel.draft.collectAsState()
 
     // Camera open karne ka launcher
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicturePreview()
     ) { bitmap: Bitmap? ->
-        capturedImage = bitmap
+        if (bitmap != null) viewModel.attachPhoto(userId, encodeBitmapToBase64(bitmap))
     }
 
     // context variable
@@ -80,7 +77,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
         }
 
         // Agar user ne photo kheenchi hai toh ek chota sa indicator dikha do
-        if (capturedImage != null) {
+        if (draft.imageData != null) {
             Text("📸 Photo ready! Message type kar aur bhej de...", color = MaterialTheme.colorScheme.primary)
             Spacer(modifier = Modifier.height(4.dp))
         }
@@ -92,6 +89,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
         ) {
             // CAMERA BUTTON
             IconButton(
+                enabled = enabled && !isLoading,
                 onClick = {
                     // Pehle check kar ki kya apne paas permission pehle se hai?
                     val hasPermission = ContextCompat.checkSelfPermission(
@@ -112,8 +110,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
             }
 
             OutlinedTextField(
-                value = inputText,
-                onValueChange = { inputText = it },
+                value = draft.text,
+                onValueChange = { viewModel.updateDraftText(it) },
                 modifier = Modifier.weight(1f),
                 placeholder = { Text("Photo bhej ya type kar...") },
                 shape = RoundedCornerShape(24.dp)
@@ -123,18 +121,9 @@ fun ChatScreen(viewModel: ChatViewModel) {
             // SEND BUTTON
             IconButton(
                 onClick = {
-                    if (inputText.isNotBlank()) {
-                        // Agar image hai toh usko Base64 banayenge, warna null
-                        val base64String = capturedImage?.let { encodeBitmapToBase64(it) }
-
-                        viewModel.sendMessage(inputText, base64String)
-
-                        // Sab bhejne ke baad box aur image khali kar do
-                        inputText = ""
-                        capturedImage = null
-                    }
+                    viewModel.sendDraft()
                 },
-                enabled = !isLoading,
+                enabled = enabled && !isLoading && draft.text.isNotBlank(),
                 modifier = Modifier.background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50))
             ) {
                 if (!isLoading){

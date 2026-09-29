@@ -3,6 +3,7 @@ using OpenAI.Embeddings;
 using Qdrant.Client;
 using Qdrant.Client.Grpc;
 using RideFixBro.API.Agents;
+using RideFixBro.API.Configuration;
 using System.ComponentModel;
 using System.Text;
 using UglyToad.PdfPig;
@@ -37,7 +38,8 @@ namespace RideFixBro.API.Services
 			}
 
 			// Qdrant Cloud se connection establish kar raha hai
-			_qdrantClient = new QdrantClient(host: qdrantEndpoint, https: true, apiKey: qdrantApiKey);
+			_qdrantClient = new QdrantClient(host: qdrantEndpoint, https: true, apiKey: qdrantApiKey,
+				grpcTimeout: TimeSpan.FromSeconds(ApiTimeouts.Seconds));
 
 			// Gemini Embedding Client Setup (OpenAI proxy)
 			var openAIClient = OpenAIClientBuilder.Create(geminiApiKey);
@@ -131,16 +133,22 @@ namespace RideFixBro.API.Services
 		// User ki query ko Qdrant mein search karne ke liye
 		[Function]
 		[Description("Motorcycle ki manual, technical repair steps, torque specs, ya error codes search karne ke liye is tool ka use karein. (e.g. 'X440 spark plug replacement')")]
-		public async Task<string> SearchManualAsync(
+		public Task<string> SearchManualAsync(
 			[Description("Search query jo DB mein dhoondhni hai")] string userQuery)
 		{
+			return SearchManualAsync(userQuery, CancellationToken.None);
+		}
+
+		public async Task<string> SearchManualAsync(string userQuery, CancellationToken cancellationToken)
+		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(userQuery);
-			var embeddingResponse = await _embeddingClient.GenerateEmbeddingAsync(userQuery);
+			var embeddingResponse = await _embeddingClient.GenerateEmbeddingAsync(userQuery, cancellationToken: cancellationToken);
 			var queryVector = embeddingResponse.Value.ToFloats().ToArray();
 			var searchResults = await _qdrantClient.QueryAsync(
 				collectionName: _collectionName,
 				query: queryVector,
-				limit: 3
+				limit: 3,
+				cancellationToken: cancellationToken
 			);
 
 			var contextText = new StringBuilder();

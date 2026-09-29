@@ -12,6 +12,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -50,7 +51,20 @@ class MainActivity : ComponentActivity() {
                     } else {
                         Column(Modifier.fillMaxSize().systemBarsPadding()) {
                             TextButton(onClick = { authViewModel.signOut() }) { Text("Sign out") }
-                            ChatScreen(chatViewModel)
+                            if (authState.loading) {
+                                Text("Session reconnect ho raha hai...")
+                            }
+                            authState.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                            if (!authState.loading && !authState.sessionReady) {
+                                TextButton(onClick = { authViewModel.retry() }) { Text("Retry connection") }
+                            }
+                            key(authState.profile!!.supabaseUserId) {
+                                ChatScreen(
+                                    chatViewModel,
+                                    userId = authState.profile!!.supabaseUserId,
+                                    enabled = authState.sessionReady && !authState.loading
+                                )
+                            }
                         }
                     }
                 }

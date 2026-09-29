@@ -21,7 +21,12 @@ namespace RideFixBro.API.Services
 		// Ye [Function] tag AutoGen ko batata hai ki AI isko use kar sakta hai
 		[Function]
 		[Description("Internet par live search karne ke liye is tool ka use karein. Ye latest data, prices, aur market info layega.")]
-		public async Task<string> SearchInternetAsync([Description("Search query jise internet par dhoondhna hai, jaise 'latest riding jacket price'")] string query)
+		public Task<string> SearchInternetAsync([Description("Search query jise internet par dhoondhna hai, jaise 'latest riding jacket price'")] string query)
+		{
+			return SearchInternetAsync(query, CancellationToken.None);
+		}
+
+		public async Task<string> SearchInternetAsync(string query, CancellationToken cancellationToken)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(query);
 			var requestBody = new
@@ -34,10 +39,10 @@ namespace RideFixBro.API.Services
 			};
 
 			using var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-			using var response = await _httpClient.PostAsync("https://api.tavily.com/search", content);
+			using var response = await _httpClient.PostAsync("https://api.tavily.com/search", content, cancellationToken);
 			response.EnsureSuccessStatusCode();
 
-			var resultStr = await response.Content.ReadAsStringAsync();
+			var resultStr = await response.Content.ReadAsStringAsync(cancellationToken);
 			using var doc = JsonDocument.Parse(resultStr);
 
 			if (doc.RootElement.TryGetProperty("answer", out var answerElement) &&

@@ -24,10 +24,12 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
+import java.io.InterruptedIOException
 
 data class AuthUiState(
     val loading: Boolean = true,
     val signedIn: Boolean = false,
+    val sessionReady: Boolean = false,
     val profile: UserProfileResponse? = null,
     val error: String? = null
 )
@@ -69,21 +71,29 @@ class AuthViewModel(
                     .collectLatest { status ->
                         if (signingOut) return@collectLatest
                         when (status) {
-                            SessionStatus.Initializing -> _state.value = AuthUiState(loading = true)
+                            SessionStatus.Initializing -> {
+                                // App background mein gayi hai, logout nahi. Existing screen/profile rehne do.
+                                _state.value = _state.value.copy(loading = true, sessionReady = false, error = null)
+                            }
                             is SessionStatus.NotAuthenticated -> {
                                 _state.value = AuthUiState(loading = authJob?.isActive == true)
                             }
                             is SessionStatus.RefreshFailure -> {
-                                _state.value = AuthUiState(
-                                    loading = false, signedIn = true,
+                                _state.value = _state.value.copy(
+                                    loading = false, signedIn = true, sessionReady = false,
                                     error = "Session refresh nahi ho paayi. Internet check kar; SDK retry kar raha hai."
                                 )
                             }
                             is SessionStatus.Authenticated -> {
-                                _state.value = AuthUiState(loading = true, signedIn = true)
+                                val userId = status.session.user?.id
+                                if (_state.value.profile?.supabaseUserId == userId && userId != null) {
+                                    _state.value = _state.value.copy(loading = true, sessionReady = false, error = null)
+                                } else {
+                                    // Actual account change par old profile turant hatao.
+                                    _state.value = AuthUiState(loading = true, signedIn = true)
+                                }
                                 try {
-                                    val userId = status.session.user?.id
-                                        ?: throw LoginRequiredException("Session has no user.")
+                                    if (userId == null) throw LoginRequiredException("Session has no user.")
                                     loadProfile(userId)
                                 } catch (error: CancellationException) {
                                     throw error
@@ -134,7 +144,7 @@ class AuthViewModel(
             check(profile.supabaseUserId == userId) { "The API returned a different account." }
             if (signingOut) return
             // collectLatest purane account ki pending profile request cancel kar deta hai.
-            _state.value = AuthUiState(loading = false, signedIn = true, profile = profile)
+            _state.value = AuthUiState(loading = false, signedIn = true, sessionReady = true, profile = profile)
         } catch (error: HttpException) {
             if (error.code() == 401) auth.invalidateSession(userId, token)
             throw error
@@ -162,9 +172,10 @@ class AuthViewModel(
             is NoCredentialException -> "Google account select nahi hua. Device ka Google account aur Play Services check kar."
             is LoginRequiredException -> "Session expire ho gaya. Google se dobara sign in kar."
             is SessionNotReadyException -> "Session restore/refresh chal raha hai. Internet check karke retry kar."
+            is InterruptedIOException -> "Request 45 seconds mein complete nahi hui. Dobara try kar."
             is HttpException -> "API account verify nahi kar paayi (${error.code()}). Retry kar."
             else -> "Sign-in complete nahi hua. Network/configuration check karke retry kar."
         }
-        _state.value = _state.value.copy(loading = false, error = message)
+        _state.value = _state.value.copy(loading = false, sessionReady = false, error = message)
     }
 }

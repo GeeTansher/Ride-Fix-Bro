@@ -28,6 +28,7 @@ import java.net.URISyntaxException
 import java.security.MessageDigest
 import java.util.UUID
 import kotlin.time.Clock
+import kotlin.time.Duration.Companion.seconds
 
 @OptIn(kotlin.time.ExperimentalTime::class)
 class AuthRepository(context: Context) {
@@ -44,6 +45,7 @@ class AuthRepository(context: Context) {
             BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_PUBLISHABLE_KEY, BuildConfig.GOOGLE_WEB_CLIENT_ID
         )
         createSupabaseClient(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_PUBLISHABLE_KEY) {
+            requestTimeout = 45.seconds
             // SDK debug logs session/token include kar sakte hain. App errors UI mein safely dikhayenge.
             defaultLogLevel = LogLevel.NONE
             install(Auth) {

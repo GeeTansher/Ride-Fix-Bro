@@ -95,6 +95,8 @@ namespace RideFixBro.API.Services
 			}
 			catch (Exception ex)
 			{
+				// Provider cancellation ko generic server error mat banao.
+				cancellationToken.ThrowIfCancellationRequested();
 				_logger.LogError(ex, "Mechanic chat failed; the incomplete turn was not saved.");
 				throw;
 			}

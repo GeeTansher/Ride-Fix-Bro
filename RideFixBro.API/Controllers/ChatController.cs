@@ -53,6 +53,7 @@ namespace RideFixBro.API.Controllers
 			}
 			catch (Exception)
 			{
+				cancellationToken.ThrowIfCancellationRequested();
 				// Asli exception service logs mein hai; provider/internal details client ko mat bhej.
 				return StatusCode(500, new { Error = "Bhai, abhi answer nahi aa paaya. Thodi der baad dobara try kar." });
 			}
