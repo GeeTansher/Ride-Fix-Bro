@@ -13,6 +13,8 @@ public partial class UserBike
 
     public DateTime CreatedAt { get; set; }
 
+    public bool IsDeleted { get; set; }
+
     public virtual MasterBike Bike { get; set; } = null!;
 
     public virtual ICollection<ChatSession> ChatSessions { get; set; } = new List<ChatSession>();

@@ -47,6 +47,8 @@ public partial class RideFixBroDbContext : DbContext
 
             entity.ToTable("MasterBikes", "RideFix_Customs");
 
+            entity.HasIndex(e => new { e.Make, e.Model, e.Year }, "UX_MasterBikes_Make_Model_Year").IsUnique();
+
             entity.Property(e => e.Make).HasMaxLength(100);
             entity.Property(e => e.Model).HasMaxLength(100);
         });
@@ -103,6 +105,8 @@ public partial class RideFixBroDbContext : DbContext
             entity.ToTable("UserBikes", "RideFix");
 
             entity.HasIndex(e => new { e.Id, e.UserId }, "UQ_UserBikes_Id_UserId").IsUnique();
+
+            entity.HasIndex(e => new { e.UserId, e.BikeId }, "UX_UserBikes_UserId_BikeId").IsUnique();
 
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("(getutcdate())");
 
