@@ -61,7 +61,7 @@ namespace RideFixBro.API.Tests
 				Assert.Equal(1, await database.UserBikes.CountAsync());
 				Assert.Equal(1, await database.ChatSessions.CountAsync());
 				Assert.Equal(1, await database.Messages.CountAsync());
-				Assert.True(await database.UserBikes.Select(row => EF.Property<bool>(row, "IsDeleted")).SingleAsync());
+				Assert.True(await database.UserBikes.Select(row => row.IsDeleted).SingleAsync());
 			}
 			var restored = await AddBike(client, 101);
 			Assert.Equal(bike.Id, restored.Id);

@@ -1,22 +1,13 @@
--- Target application database mein run karke ChatSessions, Messages aur Users re-scaffold karo.
+-- Target application database mein run karke ChatSessions aur Users re-scaffold karo.
 -- Existing chats/messages delete nahi honge. Memory-only chats is script se migrate nahi hote.
--- SessionId API wala public ID hai; numeric Id existing message FK ke liye rahega.
+-- Existing ChatSessions.Id hi API aur Messages ka stable chat ID rahega.
+-- Koi extra ID column ya naya index nahi; existing indexes/unique constraints bhi nahi hatenge.
 -- Stored chat mein UserBikeId NULL = explicitly selected General; alag IsGeneral column redundant hai.
+-- API ko new chat par explicit General/bike selection aur existing chat par owner check karna hoga.
 SET XACT_ABORT ON;
 
 BEGIN TRY
     BEGIN TRANSACTION;
-
-    IF COL_LENGTH('RideFix.ChatSessions', 'SessionId') IS NULL
-        ALTER TABLE RideFix.ChatSessions ADD SessionId NVARCHAR(128) NOT NULL
-            CONSTRAINT DF_ChatSessions_SessionId DEFAULT (CONVERT(NVARCHAR(36), NEWID())) WITH VALUES;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE object_id = OBJECT_ID('RideFix.ChatSessions') AND name = 'UX_ChatSessions_UserId_SessionId'
-    )
-        EXEC(N'CREATE UNIQUE INDEX UX_ChatSessions_UserId_SessionId
-            ON RideFix.ChatSessions (UserId, SessionId);');
 
     IF EXISTS (
         SELECT 1 FROM sys.columns
@@ -50,13 +41,6 @@ BEGIN TRY
     )
         ALTER TABLE RideFix.ChatSessions WITH CHECK ADD CONSTRAINT FK_ChatSessions_Users
             FOREIGN KEY (UserId) REFERENCES RideFix.Users (Id);
-
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE object_id = OBJECT_ID('RideFix.Messages') AND name = 'IX_Messages_Session_Turn'
-    )
-        CREATE INDEX IX_Messages_Session_Turn
-            ON RideFix.Messages (ChatSessionId, TurnNumber, SequenceNumber);
 
     COMMIT TRANSACTION;
 END TRY

@@ -1,7 +1,9 @@
 -- Target application database mein run karke MasterBikes re-scaffold karo.
 -- ManualKey ek verified manual/document set ko identify karta hai, bike ke display name ko nahi.
+-- Ye hamari chosen mapping string hai; Qdrant collection/point ID ya auto-generated key nahi.
 -- Same manual multiple years cover kare toh sirf verified catalog rows ko same key assign karo.
 -- NULL = manual unavailable. Mapping sirf catalog entry hone se automatically nahi banti.
+-- Sirf nullable column aur non-blank CHECK constraint add hote hain; koi naya index nahi.
 SET XACT_ABORT ON;
 
 BEGIN TRY
