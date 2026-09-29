@@ -30,5 +30,5 @@ END CATCH;
 
 -- Qdrant chunks par isi exact, case-sensitive string ka manual_key payload hona chahiye.
 -- Pehle source manual ka model/year verify karo; neeche wala example jaan-boojhkar execute nahi hota.
--- UPDATE RideFix_Customs.MasterBikes SET ManualKey = N'harley-x440-2024-owner-v1'
--- WHERE Make = N'Harley-Davidson' AND Model = N'X440' AND Year = 2024;
+UPDATE RideFix_Customs.MasterBikes SET ManualKey = N'harley-x440-2024-owner-v1'
+WHERE Make = N'Harley-Davidson' AND Model = N'X440' AND Year = 2024;

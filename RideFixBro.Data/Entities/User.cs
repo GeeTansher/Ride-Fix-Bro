@@ -15,6 +15,8 @@ public partial class User
 
     public DateTime CreatedAt { get; set; }
 
+    public virtual ICollection<ChatSession> ChatSessions { get; set; } = new List<ChatSession>();
+
     public virtual MasterUserRole Role { get; set; } = null!;
 
     public virtual ICollection<UserBike> UserBikes { get; set; } = new List<UserBike>();

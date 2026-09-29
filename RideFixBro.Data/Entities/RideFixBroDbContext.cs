@@ -34,10 +34,14 @@ public partial class RideFixBroDbContext : DbContext
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("(getutcdate())");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
 
+            entity.HasOne(d => d.User).WithMany(p => p.ChatSessions)
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_ChatSessions_Users");
+
             entity.HasOne(d => d.UserBike).WithMany(p => p.ChatSessions)
                 .HasPrincipalKey(p => new { p.Id, p.UserId })
                 .HasForeignKey(d => new { d.UserBikeId, d.UserId })
-                .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK_ChatSessions_UserBikeOwner");
         });
 
@@ -50,6 +54,7 @@ public partial class RideFixBroDbContext : DbContext
             entity.HasIndex(e => new { e.Make, e.Model, e.Year }, "UX_MasterBikes_Make_Model_Year").IsUnique();
 
             entity.Property(e => e.Make).HasMaxLength(100);
+            entity.Property(e => e.ManualKey).HasMaxLength(128);
             entity.Property(e => e.Model).HasMaxLength(100);
         });
 

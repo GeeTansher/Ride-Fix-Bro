@@ -13,5 +13,7 @@ public partial class MasterBike
 
     public int Year { get; set; }
 
+    public string? ManualKey { get; set; }
+
     public virtual ICollection<UserBike> UserBikes { get; set; } = new List<UserBike>();
 }
