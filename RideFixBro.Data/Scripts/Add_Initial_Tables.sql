@@ -20,7 +20,10 @@ CREATE TABLE RideFix_Customs.MasterBikes (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Make NVARCHAR(100) NOT NULL, 
     Model NVARCHAR(100) NOT NULL, 
-    Year INT NOT NULL
+    Year INT NOT NULL,
+    ManualKey NVARCHAR(128) NULL,
+
+    CONSTRAINT CK_MasterBikes_ManualKey CHECK (ManualKey IS NULL OR LEN(LTRIM(RTRIM(ManualKey))) > 0)
 );
 
 -- Dummy master bike
@@ -59,13 +62,18 @@ CREATE TABLE RideFix.UserBikes (
 CREATE TABLE RideFix.ChatSessions (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     UserId INT NOT NULL,
-    UserBikeId INT NOT NULL, 
+    SessionId NVARCHAR(128) NOT NULL CONSTRAINT DF_ChatSessions_SessionId DEFAULT (CONVERT(NVARCHAR(36), NEWID())),
+    UserBikeId INT NULL,
     IsActive BIT NOT NULL DEFAULT 1,
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     
+    -- NULL bike means General. User must exist even when the composite bike FK has a NULL.
+    CONSTRAINT FK_ChatSessions_Users FOREIGN KEY (UserId) REFERENCES RideFix.Users(Id),
     -- Ye cross-check karta hai ki jo bike chat mein hai, wo sach mein usi user ki hai
     CONSTRAINT FK_ChatSessions_UserBikeOwner FOREIGN KEY (UserBikeId, UserId) REFERENCES RideFix.UserBikes (Id, UserId)
 );
+
+CREATE UNIQUE INDEX UX_ChatSessions_UserId_SessionId ON RideFix.ChatSessions (UserId, SessionId);
 
 -- 6. Messages Table (The Heavy Lifter)
 CREATE TABLE RideFix.Messages (
@@ -92,4 +100,5 @@ CREATE TABLE RideFix.Messages (
     -- Ek session ke andar same sequence number dobara nahi aa sakta
     CONSTRAINT UQ_Messages_Session_Sequence UNIQUE (ChatSessionId, SequenceNumber)
 );
+CREATE INDEX IX_Messages_Session_Turn ON RideFix.Messages (ChatSessionId, TurnNumber, SequenceNumber);
 GO
