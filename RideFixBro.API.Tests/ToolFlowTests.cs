@@ -7,6 +7,7 @@ using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.Services;
+using RideFixBro.API.Models;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using System.Net;
@@ -40,12 +41,12 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(agent, store);
 
-			Assert.Equal("Bhai, here is the answer.", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "First question"));
-			Assert.Equal("Bhai, follow-up answer.", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Next question"));
+			Assert.Equal("Bhai, here is the answer.", await manager.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("First question", null)));
+			Assert.Equal("Bhai, follow-up answer.", await manager.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Next question", null)));
 
 			Assert.Equal(4, invoked.Count);
-			Assert.Equal(7, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
-			foreach (var exchange in store.GetHistory($"{AuthTestTokens.UserId:D}:session")
+			Assert.Equal(7, store.GetHistory(1).Count);
+			foreach (var exchange in store.GetHistory(1)
 				.OfType<AggregateMessage<ToolCallMessage, ToolCallResultMessage>>())
 			{
 				Assert.All(exchange.Message1.ToolCalls, call => Assert.Null(call.Result));
@@ -75,12 +76,14 @@ namespace RideFixBro.API.Tests
 		}
 
 		[Fact]
-		public async Task ProductionFactoryInvokesGeneratedInternetWrapper()
+		public async Task ProductionFactoryUsesGeneratedInternetContractAndCustomExecution()
 		{
 			using var modelHandler = new RecordingHandler(
 				ToolReply(Call("web", "SearchInternetAsync", """{"query":"helmet price"}""", "signature")),
 				TextReply("Found the price."));
-			using var searchHandler = new RecordingHandler("""{"answer":"Verified search result"}""");
+			using var searchHandler = new RecordingHandler("""
+				{"answer":"Verified search result","results":[{"title":"Source report","url":"https://sources.example.test/report","content":"Retrieved excerpt"}]}
+				""");
 			using var searchClient = new HttpClient(searchHandler);
 			var config = Configuration();
 			var tavily = new TavilySearchService(config, searchClient);
@@ -88,28 +91,105 @@ namespace RideFixBro.API.Tests
 			var agent = MechanicBroAgent.Create(CreateClient(modelHandler), tavily, vector);
 			var manager = CreateManager(agent, new InMemoryChatStore());
 
-			Assert.Equal("Found the price.", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+			Assert.Equal("Found the price.", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
 			Assert.Equal("helmet price", Assert.Single(searchHandler.Requests).GetProperty("query").GetString());
 			var tools = modelHandler.Requests[0].GetProperty("tools").EnumerateArray()
 				.Select(tool => tool.GetProperty("function").GetProperty("name").GetString()).ToArray();
-			Assert.Equal(new[] { "SearchInternetAsync", "SearchManualAsync" }, tools);
+			Assert.Equal(new[] { "SearchInternetAsync" }, tools);
 			Assert.Contains("Verified search result", modelHandler.Requests[1].GetRawText());
+			var toolResult = modelHandler.Requests[1].GetProperty("messages").EnumerateArray()
+				.Single(message => message.GetProperty("role").GetString() == "tool");
+			using var wrapped = JsonDocument.Parse(toolResult.GetProperty("content").GetString()!);
+			using var evidence = JsonDocument.Parse(wrapped.RootElement.GetProperty("result").GetString()!);
+			Assert.Equal("https://sources.example.test/report", evidence.RootElement.GetProperty("results")[0].GetProperty("url").GetString());
+			Assert.Equal("Retrieved excerpt", evidence.RootElement.GetProperty("results")[0].GetProperty("content").GetString());
 		}
 
 		[Fact]
-		public async Task ProductionFactoryInvokesGeneratedManualWrapperAndDoesNotSwallowInvalidQuery()
+		public async Task ManualCanBeFollowedByWebResearchWithClearSourceInstructions()
+		{
+			using var handler = new RecordingHandler(
+				ToolReply(Call("manual", "SearchManualAsync", """{"userQuery":"maintenance"}""", "manual-signature")),
+				ToolReply(Call("web", "SearchInternetAsync", """{"query":"X440 2024 owner maintenance experiences Reddit"}""", "web-signature")),
+				TextReply("Manual se: manual findings. Internet / rider reports: individual experiences."));
+			var calls = new List<string>();
+			var agent = CreateAgent(handler, _ =>
+			{
+				calls.Add("web");
+				return Task.FromResult("""{"results":[{"title":"Owner experience","url":"https://reviews.example.test/post","content":"Individual experience, not a specification"}]}""");
+			}, _ =>
+			{
+				calls.Add("manual");
+				return Task.FromResult("Applicable manual passage");
+			});
+			await CreateManager(agent, new InMemoryChatStore())
+				.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Manual guidance and real-world feedback?", null));
+
+			Assert.Equal(new[] { "manual", "web" }, calls);
+			var instructions = handler.Requests[0].GetProperty("messages")[0].GetProperty("content").GetString()!;
+			Assert.Contains("MANUAL FIRST, MANUAL ONLY NAHI", instructions);
+			Assert.Contains("'Manual se' aur 'Internet / rider reports'", instructions);
+			Assert.Contains("General chat ya unavailable manual mein internet search allowed hai", instructions);
+			Assert.Contains("Source/link nahi mila toh limitation batao", instructions);
+			Assert.Contains("safety-critical procedure override mat karo", instructions);
+			Assert.All(handler.Requests, AssertValidSequence);
+		}
+
+		[Fact]
+		public async Task ProductionFactoryExposesOnlyUserQueryAndExecutesTheRealManualMethod()
 		{
 			using var handler = new RecordingHandler(
 				ToolReply(Call("manual", "SearchManualAsync", """{"userQuery":""}""", "signature")));
 			using var httpClient = new HttpClient(new RecordingHandler());
 			var config = Configuration();
+			var vector = new VectorDbService(config);
+			Assert.Equal(new[] { "userQuery", "manualKey", "cancellationToken" },
+				vector.SearchManualAsyncFunctionContract.Parameters!.Select(parameter => parameter.Name));
 			var agent = MechanicBroAgent.Create(CreateClient(handler),
-				new TavilySearchService(config, httpClient), new VectorDbService(config));
+				new TavilySearchService(config, httpClient), vector);
 			var store = new InMemoryChatStore();
 
-			await Assert.ThrowsAsync<ArgumentException>(() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
-			Assert.Single(handler.Requests);
+			var error = await Assert.ThrowsAsync<ArgumentException>(() => CreateManager(agent, store)
+				.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Search", null)));
+			Assert.Equal("userQuery", error.ParamName);
+			Assert.Empty(store.GetHistory(1));
+			var request = Assert.Single(handler.Requests);
+			var manual = request.GetProperty("tools").EnumerateArray()
+				.Select(tool => tool.GetProperty("function"))
+				.Single(function => function.GetProperty("name").GetString() == "SearchManualAsync");
+			var schema = manual.GetProperty("parameters");
+			Assert.Contains("verified manual", manual.GetProperty("description").GetString());
+			var property = Assert.Single(schema.GetProperty("properties").EnumerateObject());
+			Assert.Equal("userQuery", property.Name);
+			Assert.Equal("string", property.Value.GetProperty("type").GetString());
+			Assert.Equal("userQuery", Assert.Single(schema.GetProperty("required").EnumerateArray()).GetString());
+			Assert.Equal(3, vector.SearchManualAsyncFunctionContract.Parameters!.Count());
+		}
+
+		[Fact]
+		public async Task ManualExecutionReceivesServerKeyAndRequestTokenNotModelSuppliedValues()
+		{
+			using var handler = new RecordingHandler(
+				ToolReply(Call("manual", "SearchManualAsync", """{"userQuery":"maintenance","manualKey":"another-manual"}""", "signature")),
+				TextReply("Answer"));
+			string? executedKey = null;
+			CancellationToken executedToken = default;
+			var agent = MechanicBroAgent.CreateCore(CreateClient(handler), [Contract("SearchManualAsync", "userQuery")],
+				new Dictionary<string, Func<string, string?, CancellationToken, Task<string>>>
+				{
+					["SearchManualAsync"] = (_, key, token) =>
+					{
+						executedKey = key;
+						executedToken = token;
+						return Task.FromResult("Selected manual passage");
+					}
+				});
+			using var cancellation = new CancellationTokenSource();
+			await CreateManager(agent, new InMemoryChatStore())
+				.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Search", null), cancellation.Token);
+			Assert.Equal(ManualBike.ManualKey, executedKey);
+			Assert.Equal(cancellation.Token, executedToken);
+			Assert.All(handler.Requests, AssertValidSequence);
 		}
 
 		[Theory]
@@ -124,9 +204,9 @@ namespace RideFixBro.API.Tests
 			var agent = CreateAgent(handler, _ => Task.FromResult(result!));
 
 			var error = await Assert.ThrowsAsync<InvalidOperationException>(
-				() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
 			Assert.Contains("empty result", error.Message);
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
+			Assert.Empty(store.GetHistory(1));
 			Assert.Single(handler.Requests);
 		}
 
@@ -144,9 +224,9 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store);
 
-			await Assert.ThrowsAsync<InvalidOperationException>(() => manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Failed turn"));
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
-			Assert.Equal("Recovered", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "New turn"));
+			await Assert.ThrowsAsync<InvalidOperationException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Failed turn", null)));
+			Assert.Empty(store.GetHistory(1));
+			Assert.Equal("Recovered", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("New turn", null)));
 			Assert.Equal(new[] { "system", "user" }, Roles(handler.Requests[1]));
 		}
 
@@ -161,13 +241,13 @@ namespace RideFixBro.API.Tests
 			handler.StatusCodes[2] = HttpStatusCode.BadRequest;
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store);
-			await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Saved question");
+			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Saved question", null));
 
 			var error = await Assert.ThrowsAsync<ClientResultException>(
-				() => manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Failed question"));
+				() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Failed question", null)));
 			Assert.Equal(400, error.Status);
-			Assert.Equal(2, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
-			Assert.Equal("Recovered", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Retry"));
+			Assert.Equal(2, store.GetHistory(1).Count);
+			Assert.Equal("Recovered", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Retry", null)));
 			Assert.Equal(new[] { "system", "user", "assistant", "user" }, Roles(handler.Requests[3]));
 			Assert.DoesNotContain("Failed question", handler.Requests[3].GetRawText());
 		}
@@ -187,12 +267,12 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			var error = await Assert.ThrowsAsync<ChatLimitExceededException>(
-				() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
 
 			Assert.Contains("5 rounds", error.Message);
 			Assert.Equal(5, executions);
 			Assert.Equal(6, handler.Requests.Count);
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
+			Assert.Empty(store.GetHistory(1));
 		}
 
 		[Fact]
@@ -204,8 +284,8 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(responses);
 			var store = new InMemoryChatStore();
 
-			Assert.Equal("Done", await CreateManager(CreateAgent(handler), store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
-			Assert.Equal(7, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
+			Assert.Equal("Done", await CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Search", null)));
+			Assert.Equal(7, store.GetHistory(1).Count);
 			Assert.All(handler.Requests, request => AssertValidSequence(request));
 		}
 
@@ -218,8 +298,8 @@ namespace RideFixBro.API.Tests
 				TextReply("Second"));
 			var manager = CreateManager(CreateAgent(handler), new InMemoryChatStore(), maxToolRounds: 1);
 
-			Assert.Equal("First", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "First"));
-			Assert.Equal("Second", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Second"));
+			Assert.Equal("First", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("First", null)));
+			Assert.Equal("Second", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Second", null)));
 			Assert.Equal(4, handler.Requests.Count);
 		}
 
@@ -231,18 +311,19 @@ namespace RideFixBro.API.Tests
 			var image = $"data:image/png;base64,{Convert.ToBase64String(ImageFixtures.Png())}";
 			var store = new InMemoryChatStore();
 
-			Assert.Equal("Hi bro", await CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Hi", image));
+			Assert.Equal("Hi bro", await CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Hi", image)));
 			var content = handler.Requests[0].GetProperty("messages")[1].GetProperty("content");
 			Assert.Equal(image, content[1].GetProperty("image_url").GetProperty("url").GetString());
-			Assert.Equal(2, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
+			Assert.Equal(2, store.GetHistory(1).Count);
 		}
 
 		[Fact]
-		public async Task EmptySessionIdIsRejectedBeforeCallingTheProvider()
+		public async Task NonPersistedChatIdIsRejectedBeforeCallingTheProvider()
 		{
 			using var handler = new RecordingHandler();
 			await Assert.ThrowsAsync<ChatInputException>(
-				() => CreateManager(CreateAgent(handler), new InMemoryChatStore()).AskMechanicBro(AuthTestTokens.UserId, "", "Hi"));
+				() => CreateManager(CreateAgent(handler), new InMemoryChatStore())
+					.AskMechanicBro(new ChatContext(0, null), new ChatInput("Hi", null)));
 			Assert.Empty(handler.Requests);
 		}
 
@@ -261,9 +342,9 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 
-			await Assert.ThrowsAnyAsync<JsonException>(() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+			await Assert.ThrowsAnyAsync<JsonException>(() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
 			Assert.Equal(0, executions);
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
+			Assert.Empty(store.GetHistory(1));
 		}
 
 		[Theory]
@@ -277,9 +358,9 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 
 			await Assert.ThrowsAsync<InvalidOperationException>(() =>
-				CreateManager(CreateAgent(handler), store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+				CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
 			Assert.Single(handler.Requests);
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
+			Assert.Empty(store.GetHistory(1));
 		}
 
 		[Theory]
@@ -290,8 +371,8 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(TextReply(text));
 			var store = new InMemoryChatStore();
 			await Assert.ThrowsAsync<InvalidOperationException>(() =>
-				CreateManager(CreateAgent(handler), store).AskMechanicBro(AuthTestTokens.UserId, "session", "Hi"));
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
+				CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Hi", null)));
+			Assert.Empty(store.GetHistory(1));
 		}
 
 		internal static IConfiguration Configuration(int maxToolRounds = 5) =>
@@ -301,8 +382,11 @@ namespace RideFixBro.API.Tests
 				["API_Keys:Tavily_Api_key"] = "test-key",
 				["Qdrant_Vector_DB:Cluster_Endpoint"] = "localhost",
 				["Qdrant_Vector_DB:API_Key"] = "test-key",
+				["Qdrant_Vector_DB:ManualCollection"] = "test-manuals",
 				["Chat:MaxToolRounds"] = maxToolRounds.ToString()
 			}).Build();
+
+		internal static BikeContext ManualBike => new(1, "Harley-Davidson", "X440", 2024, "x440-2024-test");
 
 		internal static AiManagerService CreateManager(IAgent agent, InMemoryChatStore store,
 			int maxToolRounds = 5, int maxToolCalls = 6, int maxHistoryTurns = 10)
@@ -313,19 +397,19 @@ namespace RideFixBro.API.Tests
 				MaxToolCallsPerRequest = maxToolCalls,
 				MaxHistoryTurns = maxHistoryTurns
 			};
-			return new(agent, store, limits, new ChatInputValidator(limits), NullLogger<AiManagerService>.Instance);
+			return new(agent, store, limits, NullLogger<AiManagerService>.Instance);
 		}
 
 		internal static IAgent CreateAgent(RecordingHandler handler,
 			Func<string, Task<string>>? internet = null, Func<string, Task<string>>? manual = null) =>
-			MechanicBroAgent.Create(CreateClient(handler),
+			MechanicBroAgent.CreateCore(CreateClient(handler),
 			[
 				Contract("SearchInternetAsync", "query"),
 				Contract("SearchManualAsync", "userQuery")
-			], new Dictionary<string, Func<string, CancellationToken, Task<string>>>
+			], new Dictionary<string, Func<string, string?, CancellationToken, Task<string>>>
 			{
-				["SearchInternetAsync"] = (args, _) => internet is null ? Task.FromResult("Internet result") : internet(args),
-				["SearchManualAsync"] = (args, _) => manual is null ? Task.FromResult("Manual result") : manual(args)
+				["SearchInternetAsync"] = (args, _, _) => internet is null ? Task.FromResult("Internet result") : internet(args),
+				["SearchManualAsync"] = (args, _, _) => manual is null ? Task.FromResult("Manual result") : manual(args)
 			});
 
 		private static FunctionContract Contract(string name, string parameter) => new()

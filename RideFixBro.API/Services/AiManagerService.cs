@@ -3,101 +3,62 @@ using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore.Interfaces;
 using RideFixBro.API.Models;
+using RideFixBro.API.DataStore;
 
 namespace RideFixBro.API.Services
 {
 	public class AiManagerService(IAgent agent, IChatHistoryStore chatStore,
-        ChatLimitsOptions limits, ChatInputValidator inputValidator, ILogger<AiManagerService> logger)
+        ChatLimitsOptions limits, ILogger<AiManagerService> logger)
     {
 		private readonly IAgent _agent = agent;
 		private readonly IChatHistoryStore _chatHistoryStore = chatStore;
 		private readonly ILogger<AiManagerService> _logger = logger;
 		private readonly ChatLimitsOptions _limits = limits;
-		private readonly ChatInputValidator _inputValidator = inputValidator;
 
-        public async Task<string> AskMechanicBro(Guid userId, string sessionId, string userMessage,
-			string? base64Image = null, CancellationToken cancellationToken = default,
-			GarageBikeResponse? selectedBike = null, bool isGeneral = false)
+        public async Task<string> AskMechanicBro(ChatContext chat, ChatInput input, CancellationToken cancellationToken = default)
 		{
 			try
 			{
-				if (userId == Guid.Empty)
+				if (chat.Id <= 0) throw new ChatInputException("A persisted chat ID is required.");
+				var previous = await _chatHistoryStore.LoadRecentAsync(chat.Id, _limits.MaxHistoryTurns - 1, cancellationToken);
+				var history = previous.Messages.ToList();
+				var turn = new List<IMessage> { CreateUserMessage(chat, input) };
+				history.AddRange(turn);
+				var toolCallsExecuted = 0;
+				for (var round = 0; ; round++)
 				{
-					throw new ArgumentException("An authenticated user ID is required.", nameof(userId));
-				}
-				var dataUri = _inputValidator.Validate(sessionId, userMessage, base64Image);
-				if (isGeneral && selectedBike is not null)
-				{
-					throw new ChatInputException("General aur bike dono select nahi ho sakte.");
-				}
-				var messageText = userMessage;
-				if (isGeneral)
-				{
-					messageText += "\n\n[General chat: no motorcycle is selected. Manual-backed or bike-specific details are not guaranteed. Do not claim to have consulted a bike manual. Ask the user to start a bike-specific chat for applicable manual information.]";
-				}
-				else if (selectedBike is not null)
-				{
-					messageText += $"\n\n[App-selected motorcycle: {selectedBike.Make} {selectedBike.Model}, year {selectedBike.Year}. Do not substitute another bike's specifications. Retrieved manual passages must confirm applicability before presenting model-year-specific specifications.]";
-				}
-				IMessage messageToSend = new TextMessage(Role.User, messageText);
-				if (dataUri is not null)
-				{
-					messageToSend = new MultiModalMessage(Role.User,
-					[
-						new TextMessage(Role.User, messageText),
-						new ImageMessage(Role.User, dataUri)
-					]);
-				}
+					cancellationToken.ThrowIfCancellationRequested();
+					var reply = await _agent.GenerateReplyAsync(history,
+						new MechanicReplyOptions
+						{
+							ExecuteTools = round < _limits.MaxToolRounds,
+							RemainingToolCalls = _limits.MaxToolCallsPerRequest - toolCallsExecuted,
+							ManualKey = chat.Bike?.ManualKey
+						},
+						cancellationToken);
 
-				// Working history pe turn chala; final answer mila tabhi store isse save karega.
-				// Client ka session ID akela key nahi: alag users ki same ID bhi separate rahegi.
-				var historyKey = $"{userId:D}:{sessionId}";
-				return await _chatHistoryStore.UpdateHistoryAsync(historyKey, async history =>
-				{
-					TrimHistory(history, _limits.MaxHistoryTurns - 1);
-					history.Add(messageToSend);
-					var toolCallsExecuted = 0;
-					for (var round = 0; ; round++)
+					if (reply is TextMessage text && text.Role == Role.Assistant &&
+						!string.IsNullOrWhiteSpace(text.Content))
 					{
-						cancellationToken.ThrowIfCancellationRequested();
-						var reply = await _agent.GenerateReplyAsync(history,
-							new MechanicReplyOptions
-							{
-								ExecuteTools = round < _limits.MaxToolRounds,
-								RemainingToolCalls = _limits.MaxToolCallsPerRequest - toolCallsExecuted,
-								// Filhaal indexed manual X440 ki hai; doosri bike par wahi specs mat bhejo.
-								AllowManualSearch = !isGeneral && (selectedBike is null ||
-									(selectedBike.Make.Equals("Harley-Davidson", StringComparison.OrdinalIgnoreCase) &&
-									 selectedBike.Model.Equals("X440", StringComparison.OrdinalIgnoreCase)))
-							},
-							cancellationToken);
-
-						// Tool ka result user ka final answer nahi hai; woh Gemini se alag se aayega.
-						if (reply is TextMessage text && text.Role == Role.Assistant &&
-							!string.IsNullOrWhiteSpace(text.Content))
-						{
-							history.Add(reply);
-							return text.Content;
-						}
-
-						if (round >= _limits.MaxToolRounds)
-						{
-							throw new ChatLimitExceededException(
-								$"Bhai, {_limits.MaxToolRounds} rounds ki tool limit aa gayi. Sawal thoda chhota kar.");
-						}
-
-						if (reply is not AggregateMessage<ToolCallMessage, ToolCallResultMessage> toolReply)
-						{
-							throw new InvalidOperationException(
-								$"Expected a completed tool exchange or an assistant answer, but received {reply.GetType().Name}.");
-						}
-
-						ValidateToolExchange(toolReply);
-						toolCallsExecuted += toolReply.Message1.ToolCalls.Count();
-						// Request + results saath rakh; agli iteration mein Gemini inhe padhke aage bolega.
-						history.Add(toolReply);
+						turn.Add(reply);
+						// Save only this complete turn; old SQL history is never trimmed or rewritten.
+						await _chatHistoryStore.AppendTurnAsync(chat.Id, previous, turn, cancellationToken);
+						return text.Content;
 					}
-				}, cancellationToken, selectedBike?.Id, isGeneral);
+
+					if (round >= _limits.MaxToolRounds)
+						throw new ChatLimitExceededException(
+							$"Bhai, {_limits.MaxToolRounds} rounds ki tool limit aa gayi. Sawal thoda chhota kar.");
+					if (reply is not AggregateMessage<ToolCallMessage, ToolCallResultMessage> toolReply)
+						throw new InvalidOperationException(
+							$"Expected a completed tool exchange or an assistant answer, but received {reply.GetType().Name}.");
+
+					ValidateToolExchange(toolReply);
+					toolCallsExecuted += toolReply.Message1.ToolCalls.Count();
+					turn.Add(toolReply);
+					// Tool result final answer nahi; next model round ko complete exchange dikhao.
+					history.Add(toolReply);
+				}
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{
@@ -121,39 +82,14 @@ namespace RideFixBro.API.Services
 			}
 		}
 
-		private static void TrimHistory(List<IMessage> history, int turnsToKeep)
+		private static IMessage CreateUserMessage(ChatContext chat, ChatInput input)
 		{
-			if (turnsToKeep == 0)
-			{
-				history.Clear();
-				return;
-			}
-
-			var turnsFound = 0;
-			for (var index = history.Count - 1; index >= 0; index--)
-			{
-				var isUserMessage = false;
-				if (history[index] is TextMessage text)
-				{
-					isUserMessage = text.Role == Role.User;
-				}
-				else if (history[index] is MultiModalMessage image)
-				{
-					isUserMessage = image.Role == Role.User;
-				}
-
-				if (!isUserMessage)
-				{
-					continue;
-				}
-				turnsFound++;
-				if (turnsFound == turnsToKeep)
-				{
-					// Latest allowed turns mil gaye; unse pehle ka poora context hata do.
-					history.RemoveRange(0, index);
-					return;
-				}
-			}
+			var context = chat.Bike is { } bike
+				? $"[App-selected motorcycle: {bike.Make} {bike.Model}, year {bike.Year}. Do not substitute another bike's specifications. Retrieved manual passages must confirm applicability before presenting model-year-specific specifications.]"
+				: "[General chat: no motorcycle is selected. Manual-backed or bike-specific details are not guaranteed. Do not claim to have consulted a bike manual. Ask the user to start a bike-specific chat for applicable manual information.]";
+			var text = new UserChatMessage($"{input.Message}\n\n{context}", input.Message);
+			return input.ImageDataUri is null ? text :
+				new MultiModalMessage(Role.User, [text, new ImageMessage(Role.User, input.ImageDataUri)]);
 		}
 
 		// Har call ID ka exactly ek matching result chahiye; adhura bundle Gemini ko mat bhej.

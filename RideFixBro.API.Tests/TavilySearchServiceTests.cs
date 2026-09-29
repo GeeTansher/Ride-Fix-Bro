@@ -1,20 +1,36 @@
 using RideFixBro.API.Services;
 using System.Net;
+using System.Text.Json;
 
 namespace RideFixBro.API.Tests
 {
 	public class TavilySearchServiceTests
 	{
 		[Fact]
-		public async Task AReusedHttpClientSupportsRepeatedSearchesAndMissingAnswerFallback()
+		public async Task AReusedHttpClientPreservesSourcesWithAndWithoutASummary()
 		{
+			const string summaryAndSources = """
+				{"answer":"Search summary","results":[{"title":"Rider report","url":"https://reviews.example.test/post","content":"One rider's experience"}]}
+				""";
 			const string results = """{"answer":null,"results":[{"title":"Source","content":"Useful result"}]}""";
-			using var handler = new RecordingHandler("""{"answer":"First result"}""", results);
+			using var handler = new RecordingHandler(summaryAndSources, results);
 			using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
 			var service = new TavilySearchService(ToolFlowTests.Configuration(), client);
 
-			Assert.Equal("First result", await service.SearchInternetAsync("first"));
+			Assert.Equal(summaryAndSources, await service.SearchInternetAsync("first"));
 			Assert.Equal(results, await service.SearchInternetAsync("second"));
+		}
+
+		[Theory]
+		[InlineData("null")]
+		[InlineData("[]")]
+		[InlineData("{")]
+		public async Task InvalidResponseCannotBePresentedAsSearchEvidence(string response)
+		{
+			using var handler = new RecordingHandler(response);
+			using var client = new HttpClient(handler);
+			var service = new TavilySearchService(ToolFlowTests.Configuration(), client);
+			await Assert.ThrowsAnyAsync<JsonException>(() => service.SearchInternetAsync("search"));
 		}
 
 		[Fact]

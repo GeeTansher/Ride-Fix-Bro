@@ -20,7 +20,7 @@ namespace RideFixBro.API.Services
 
 		// Ye [Function] tag AutoGen ko batata hai ki AI isko use kar sakta hai
 		[Function]
-		[Description("Internet par live search karne ke liye is tool ka use karein. Ye latest data, prices, aur market info layega.")]
+		[Description("Search the web for current facts, prices, official technical verification, and owner reviews or Reddit discussions. Returns a summary and source titles, URLs, and excerpts for attribution; community reports are not verified specifications.")]
 		public Task<string> SearchInternetAsync([Description("Search query jise internet par dhoondhna hai, jaise 'latest riding jacket price'")] string query)
 		{
 			return SearchInternetAsync(query, CancellationToken.None);
@@ -45,16 +45,12 @@ namespace RideFixBro.API.Services
 			var resultStr = await response.Content.ReadAsStringAsync(cancellationToken);
 			using var doc = JsonDocument.Parse(resultStr);
 
-			if (doc.RootElement.TryGetProperty("answer", out var answerElement) &&
-				answerElement.ValueKind == JsonValueKind.String)
+			if (doc.RootElement.ValueKind != JsonValueKind.Object)
 			{
-				var answer = answerElement.GetString();
-				if (!string.IsNullOrWhiteSpace(answer))
-				{
-					return answer;
-				}
+				throw new JsonException("Internet search returned an invalid response object.");
 			}
 
+			// Sirf answer return karne se results ke URLs/snippets kho jaate hain; attribution ke liye saath rakho.
 			return resultStr;
 		}
 	}

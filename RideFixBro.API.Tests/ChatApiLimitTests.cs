@@ -11,6 +11,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using RideFixBro.Data.Entities;
 using RideFixBro.API.DataStore.Interfaces;
+using RideFixBro.API.DataStore;
 using RideFixBro.API.Services;
 using System.Net;
 using System.Net.Http.Json;
@@ -40,6 +41,7 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var rejectedId = await factory.CreateChatAsync(client);
 			for (var i = 0; i < 6; i++)
 			{
 				using var other = await client.PostAsJsonAsync("/test/unrestricted", new { message = "Other API" });
@@ -47,17 +49,18 @@ namespace RideFixBro.API.Tests
 			}
 			for (var i = 1; i <= 5; i++)
 			{
-				using var response = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = $"session-{i}", message = "Hi" });
+				using var response = await client.PostAsJsonAsync("/api/Chat/ask",
+					new { sessionId = await factory.CreateChatAsync(client), message = "Hi" });
 				Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 			}
 
 			client.DefaultRequestHeaders.Add("X-Forwarded-For", "192.0.2.1");
-			using var rejected = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "different", message = "Hi" });
+			using var rejected = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = rejectedId, message = "Hi" });
 			Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
 			Assert.NotNull(rejected.Headers.RetryAfter);
 			Assert.False(string.IsNullOrWhiteSpace(await Error(rejected)));
 			Assert.Equal(5, factory.Agent.Calls);
-			Assert.Empty(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:different"));
+			Assert.Empty(factory.History(rejectedId));
 			using var unaffected = await client.PostAsJsonAsync("/test/unrestricted", new { message = "Still available" });
 			Assert.Equal(HttpStatusCode.OK, unaffected.StatusCode);
 		}
@@ -68,6 +71,8 @@ namespace RideFixBro.API.Tests
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
 			var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+			var firstId = await factory.CreateChatAsync(client);
+			var secondId = await factory.CreateChatAsync(client);
 			var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 			factory.Agent.Reply = async cancellationToken =>
 			{
@@ -75,11 +80,11 @@ namespace RideFixBro.API.Tests
 				await release.Task.WaitAsync(cancellationToken);
 				return new TextMessage(Role.Assistant, "Done", "MechanicBro");
 			};
-			var first = client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "first", message = "Hi" });
+			var first = client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = firstId, message = "Hi" });
 			try
 			{
 				await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-				using var second = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "second", message = "Hi" })
+				using var second = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = secondId, message = "Hi" })
 					.WaitAsync(TimeSpan.FromSeconds(5));
 				Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
 				Assert.Equal(1, factory.Agent.Calls);
@@ -94,16 +99,16 @@ namespace RideFixBro.API.Tests
 
 			using var completed = await first.WaitAsync(TimeSpan.FromSeconds(5));
 			Assert.Equal(HttpStatusCode.OK, completed.StatusCode);
-			using var next = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "second", message = "Hi" });
+			using var next = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = secondId, message = "Hi" });
 			Assert.Equal(HttpStatusCode.OK, next.StatusCode);
 
 			for (var i = 0; i < 2; i++)
 			{
 				using var accepted = await client.PostAsJsonAsync("/api/Chat/ask",
-					new { sessionId = $"extra-{i}", message = "Hi" });
+					new { sessionId = secondId, message = "Hi" });
 				Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
 			}
-			using var sixth = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "sixth", message = "Hi" });
+			using var sixth = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = secondId, message = "Hi" });
 			Assert.Equal(HttpStatusCode.TooManyRequests, sixth.StatusCode);
 			Assert.NotNull(sixth.Headers.RetryAfter);
 			Assert.Equal(4, factory.Agent.Calls);
@@ -114,15 +119,16 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 			using var accepted = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "session", message = new string('a', 2000) });
+				new { sessionId = id, message = new string('a', 2000) });
 			Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
 			using var rejected = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "session", message = new string('a', 2001) });
+				new { sessionId = id, message = new string('a', 2001) });
 			Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
 			Assert.Contains("2000", await Error(rejected));
 			Assert.Equal(1, factory.Agent.Calls);
-			Assert.Equal(2, factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
+			Assert.Equal(2, factory.History(id).Count);
 		}
 
 		[Theory]
@@ -133,7 +139,8 @@ namespace RideFixBro.API.Tests
 			await using var factory = new ChatApiFactory();
 			factory.UseKestrel(0);
 			using var client = factory.CreateClient();
-			var json = """{"sessionId":"session","message":"Hi"}""";
+			var id = await factory.CreateChatAsync(client);
+			var json = JsonSerializer.Serialize(new { sessionId = id, message = "Hi" });
 			var exactLimit = json.PadRight(3 * 1024 * 1024);
 			using var accepted = await SendBody(client, exactLimit, unknownLength);
 			Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
@@ -150,12 +157,13 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 			using var invalid = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "session", message = "Photo", imageData = "not an image" });
+				new { sessionId = id, message = "Photo", imageData = "not an image" });
 			Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
 			using var oversized = await client.PostAsJsonAsync("/api/Chat/ask", new
 			{
-				sessionId = "session",
+				sessionId = id,
 				message = "Photo",
 				imageData = Convert.ToBase64String(new byte[2 * 1024 * 1024 + 1])
 			});
@@ -168,15 +176,16 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 			using var response = await client.PostAsJsonAsync("/api/Chat/ask", new
 			{
-				sessionId = "session",
+				sessionId = id,
 				message = "Photo",
 				imageData = ImageFixtures.JpegBase64
 			});
 			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 			Assert.Equal(1, factory.Agent.Calls);
-			Assert.IsType<MultiModalMessage>(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:session")[0]);
+			Assert.Contains("photo from this earlier turn was not stored", Assert.IsType<TextMessage>(factory.History(id)[0]).Content);
 		}
 
 		[Fact]
@@ -184,16 +193,17 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 			factory.Agent.Reply = _ => throw new ChatLimitExceededException("Bhai, tool budget khatam.");
-			using var limited = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "session", message = "Hi" });
+			using var limited = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = id, message = "Hi" });
 			Assert.Equal(HttpStatusCode.UnprocessableEntity, limited.StatusCode);
 			Assert.Contains("tool budget", await Error(limited));
 
 			factory.Agent.Reply = _ => throw new InvalidOperationException("private-provider-details");
-			using var failed = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "session", message = "Hi" });
+			using var failed = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = id, message = "Hi" });
 			Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
 			Assert.DoesNotContain("private-provider-details", await failed.Content.ReadAsStringAsync());
-			Assert.Empty(factory.Services.GetRequiredService<IChatHistoryStore>().GetHistory($"{AuthTestTokens.UserId:D}:session"));
+			Assert.Empty(factory.History(id));
 		}
 
 		private static async Task<string> Error(HttpResponseMessage response) =>
@@ -234,6 +244,26 @@ namespace RideFixBro.API.Tests
 		private readonly SqliteConnection _database = new("Data Source=:memory:");
 		private bool _seeded;
 		public DemoAgent Agent { get; } = new();
+
+		public async Task<int> CreateChatAsync(HttpClient client, int? bikeId = null)
+		{
+			using var response = await client.GetAsync("/api/me");
+			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+			var userId = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetInt32();
+			using var scope = Services.CreateScope();
+			var context = await scope.ServiceProvider.GetRequiredService<ChatSessionService>()
+				.CreateAsync(userId, bikeId, bikeId is null, CancellationToken.None);
+			return context.Id;
+		}
+
+		public List<IMessage> History(int id, Guid? user = null)
+		{
+			using var scope = Services.CreateScope();
+			var owner = user ?? AuthTestTokens.UserId;
+			return scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>().Messages.AsNoTracking()
+				.Where(row => row.ChatSessionId == id && row.ChatSession.User.SupabaseUserId == owner)
+				.OrderBy(row => row.SequenceNumber).AsEnumerable().Select(ChatMessageCodec.Decode).ToList();
+		}
 
 		public HttpClient Client(bool authenticated = true)
 		{

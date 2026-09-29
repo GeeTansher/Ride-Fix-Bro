@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using RideFixBro.API.Agents;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
+using RideFixBro.API.Models;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
@@ -16,6 +17,7 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 			factory.Agent.Reply = async cancellationToken =>
 			{
 				await Task.Delay(TimeSpan.FromSeconds(46), cancellationToken);
@@ -23,7 +25,7 @@ namespace RideFixBro.API.Tests
 			};
 			var elapsed = Stopwatch.StartNew();
 			using var response = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "slow-chat", message = "A longer request" }).WaitAsync(TimeSpan.FromSeconds(75));
+				new { sessionId = id, message = "A longer request" }).WaitAsync(TimeSpan.FromSeconds(75));
 			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 			Assert.True(elapsed.Elapsed >= TimeSpan.FromSeconds(45));
 			Assert.Contains("Slow answer completed", await response.Content.ReadAsStringAsync());
@@ -36,6 +38,7 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 			using var warmup = await client.GetAsync("/api/me");
 			Assert.Equal(HttpStatusCode.OK, warmup.StatusCode);
 			var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -59,7 +62,7 @@ namespace RideFixBro.API.Tests
 			};
 			using var cancellation = new CancellationTokenSource();
 			var request = client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "cancelled", message = "Slow" }, cancellation.Token);
+				new { sessionId = id, message = "Slow" }, cancellation.Token);
 			try
 			{
 				await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
@@ -70,11 +73,10 @@ namespace RideFixBro.API.Tests
 			}
 			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
 			await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-			Assert.Empty(factory.Services.GetRequiredService<IChatHistoryStore>()
-				.GetHistory($"{AuthTestTokens.UserId:D}:cancelled"));
+			Assert.Empty(factory.History(id));
 
 			factory.Agent.Reply = _ => Task.FromResult<IMessage>(new TextMessage(Role.Assistant, "Recovered"));
-			using var next = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = "cancelled", message = "Retry" });
+			using var next = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = id, message = "Retry" });
 			Assert.Equal(HttpStatusCode.OK, next.StatusCode);
 		}
 
@@ -86,7 +88,7 @@ namespace RideFixBro.API.Tests
 				ToolFlowTests.Call("second", "SearchInternetAsync", """{"query":"never"}""")));
 			var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 			var executions = 0;
-			var agent = MechanicBroAgent.Create(ToolFlowTests.CreateClient(handler),
+			var agent = MechanicBroAgent.CreateCore(ToolFlowTests.CreateClient(handler),
 				new[] { new FunctionContract
 				{
 					Name = "SearchInternetAsync",
@@ -95,9 +97,9 @@ namespace RideFixBro.API.Tests
 						Name = "query", ParameterType = typeof(string), IsRequired = true
 					}}
 				} },
-				new Dictionary<string, Func<string, CancellationToken, Task<string>>>
+				new Dictionary<string, Func<string, string?, CancellationToken, Task<string>>>
 				{
-					["SearchInternetAsync"] = async (_, token) =>
+					["SearchInternetAsync"] = async (_, _, token) =>
 					{
 						executions++;
 						started.TrySetResult();
@@ -108,12 +110,12 @@ namespace RideFixBro.API.Tests
 			using var cancel = new CancellationTokenSource();
 			var store = new InMemoryChatStore();
 			var request = ToolFlowTests.CreateManager(agent, store)
-				.AskMechanicBro(AuthTestTokens.UserId, "cancelled", "Search", cancellationToken: cancel.Token);
+				.AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null), cancel.Token);
 			await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
 			cancel.Cancel();
 			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));
 			Assert.Equal(1, executions);
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:cancelled"));
+			Assert.Empty(store.GetHistory(1));
 			Assert.Single(handler.Requests);
 		}
 	}

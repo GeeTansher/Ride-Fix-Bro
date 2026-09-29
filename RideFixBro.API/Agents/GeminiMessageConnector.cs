@@ -55,7 +55,7 @@ namespace RideFixBro.API.Agents
 			}
 		}
 
-		private sealed class GeminiToolCallMessage : ToolCallMessage
+		internal sealed class GeminiToolCallMessage : ToolCallMessage
 		{
 			// AutoGen ko apna ToolCallMessage chahiye; agle Gemini request ko asli SDK message bhi chahiye.
 			public GeminiToolCallMessage(ToolCallMessage call, AssistantChatMessage assistantMessage)

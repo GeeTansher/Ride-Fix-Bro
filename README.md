@@ -18,7 +18,6 @@ limits cause startup validation to fail rather than silently disabling controls.
 | Setting | Default |
 |---|---:|
 | `MaxMessageCharacters` | 2,000 characters |
-| `MaxSessionIdCharacters` | 128 characters |
 | `MaxImageBytes` | 2,097,152 bytes (2 MiB), one JPEG/PNG |
 | `MaxImagePixels` | 16,777,216 pixels, checked before full image decoding |
 | `MaxRequestBodyBytes` | 3,145,728 bytes (3 MiB), including Base64/JSON |
@@ -62,11 +61,11 @@ produce a final answer, but no additional tools can execute.
 Model requests and embedding calls are separate from this tool-execution count;
 these limits are not a hard token or billing cap.
 
-History retention removes complete older turns rather than individual tool
-messages. Retained tool calls preserve their original Gemini metadata. Failed
-turns and their tentative history trimming are not committed. The Android client
-may still display older messages, while model context is limited to the
-configured retention window.
+SQL retains complete saved turns; only the model's context is limited to the
+configured window of recent turns. Tool calls preserve their original Gemini
+metadata. A new turn is appended atomically after its final answer, so failed
+turns do not alter previously saved history. The Android client can page through
+older messages independently of the model context window.
 
 | HTTP status | Meaning |
 |---|---|

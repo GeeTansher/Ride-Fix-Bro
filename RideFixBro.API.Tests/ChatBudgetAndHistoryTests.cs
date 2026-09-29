@@ -1,6 +1,7 @@
 using AutoGen.Core;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.Services;
+using RideFixBro.API.Models;
 using static RideFixBro.API.Tests.ToolFlowTests;
 
 namespace RideFixBro.API.Tests
@@ -20,8 +21,8 @@ namespace RideFixBro.API.Tests
 			});
 			var manager = CreateManager(agent, new InMemoryChatStore());
 
-			Assert.Equal("First", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "First"));
-			Assert.Equal("Second", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Second"));
+			Assert.Equal("First", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("First", null)));
+			Assert.Equal("Second", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Second", null)));
 			Assert.Equal(12, executions);
 			Assert.All(handler.Requests, AssertValidSequence);
 		}
@@ -39,10 +40,10 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 
 			await Assert.ThrowsAsync<ChatLimitExceededException>(
-				() => CreateManager(agent, store).AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
 			Assert.Equal(0, executions);
 			Assert.Single(handler.Requests);
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
+			Assert.Empty(store.GetHistory(1));
 		}
 
 		[Fact]
@@ -57,12 +58,12 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(agent, store);
-			await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Saved question");
+			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Saved question", null));
 
-			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Too much"));
+			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Too much", null)));
 			Assert.Equal(4, executions);
-			Assert.Equal(2, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
-			Assert.Equal("Saved question", Assert.IsType<TextMessage>(store.GetHistory($"{AuthTestTokens.UserId:D}:session")[0]).Content);
+			Assert.Equal(2, store.GetHistory(1).Count);
+			Assert.StartsWith("Saved question", Assert.IsAssignableFrom<TextMessage>(store.GetHistory(1)[0]).Content);
 		}
 
 		[Fact]
@@ -70,11 +71,11 @@ namespace RideFixBro.API.Tests
 		{
 			using var handler = new RecordingHandler(Batch("too-many", 3));
 			var manager = CreateManager(CreateAgent(handler), new InMemoryChatStore(), maxToolCalls: 2);
-			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Search"));
+			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
 		}
 
 		[Fact]
-		public async Task KeepsTenWholeTurnsIncludingToolExchangesAndOriginalSignatures()
+		public async Task SendsTenWholeTurnsIncludingSignaturesWithoutDeletingStoredTurns()
 		{
 			var responses = Enumerable.Range(1, 12).SelectMany(i =>
 				new[] { Batch($"turn-{i}", 1), TextReply($"Answer {i}") }).ToArray();
@@ -85,15 +86,15 @@ namespace RideFixBro.API.Tests
 
 			for (var i = 1; i <= 12; i++)
 			{
-				await manager.AskMechanicBro(AuthTestTokens.UserId, "session", $"Question {i}", i == 1 ? image : null);
+				await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput($"Question {i}", i == 1 ? image : null));
 			}
 
-			var history = store.GetHistory($"{AuthTestTokens.UserId:D}:session");
-			Assert.Equal(30, history.Count);
-			Assert.Equal("Question 3", Assert.IsType<TextMessage>(history[0]).Content);
+			var history = store.GetHistory(1);
+			Assert.Equal(36, history.Count);
+			Assert.IsType<MultiModalMessage>(history[0]);
 			Assert.Equal("Answer 12", Assert.IsType<TextMessage>(history[^1]).Content);
 			var messages = handler.Requests[^1].GetProperty("messages");
-			Assert.Equal("Question 3", messages[1].GetProperty("content").GetString());
+			Assert.StartsWith("Question 3", messages[1].GetProperty("content").GetString());
 			Assert.Equal("signature-turn-3", messages[2].GetProperty("tool_calls")[0]
 				.GetProperty("extra_content").GetProperty("google").GetProperty("thought_signature").GetString());
 			Assert.All(handler.Requests, AssertValidSequence);
@@ -109,15 +110,16 @@ namespace RideFixBro.API.Tests
 			var manager = CreateManager(CreateAgent(handler), store);
 			for (var i = 1; i <= 10; i++)
 			{
-				await manager.AskMechanicBro(AuthTestTokens.UserId, "session", $"Question {i}");
+				await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput($"Question {i}", null));
 			}
 
-			var saved = store.GetHistory($"{AuthTestTokens.UserId:D}:session");
-			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Failed"));
-			Assert.Equal(saved, store.GetHistory($"{AuthTestTokens.UserId:D}:session"));
-			Assert.Equal("Recovered", await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Retry"));
-			Assert.Equal("Question 2", Assert.IsType<TextMessage>(store.GetHistory($"{AuthTestTokens.UserId:D}:session")[0]).Content);
-			Assert.Equal(20, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
+			var saved = store.GetHistory(1);
+			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Failed", null)));
+			Assert.Equal(saved, store.GetHistory(1));
+			Assert.Equal("Recovered", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Retry", null)));
+			Assert.StartsWith("Question 1", Assert.IsAssignableFrom<TextMessage>(store.GetHistory(1)[0]).Content);
+			Assert.Equal(22, store.GetHistory(1).Count);
+			Assert.StartsWith("Question 2", handler.Requests[^1].GetProperty("messages")[1].GetProperty("content").GetString());
 		}
 
 		[Fact]
@@ -126,9 +128,9 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(TextReply("First"), TextReply("Second"));
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store, maxHistoryTurns: 1);
-			await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "First");
-			await manager.AskMechanicBro(AuthTestTokens.UserId, "session", "Second");
-			Assert.Equal(2, store.GetHistory($"{AuthTestTokens.UserId:D}:session").Count);
+			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("First", null));
+			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Second", null));
+			Assert.Equal(4, store.GetHistory(1).Count);
 			Assert.Equal(2, handler.Requests[1].GetProperty("messages").GetArrayLength());
 		}
 

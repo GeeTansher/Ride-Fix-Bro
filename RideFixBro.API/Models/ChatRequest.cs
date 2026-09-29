@@ -1,12 +1,16 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 
 namespace RideFixBro.API.Models
 {
 	public class ChatRequest
 	{
-		public string SessionId { get; set; } = string.Empty;
+		// 0 = first message/new chat; positive ID = existing owned chat. JSON number, string nahi.
+		[Range(0, int.MaxValue)]
+		[JsonNumberHandling(JsonNumberHandling.Strict)]
+		public int SessionId { get; set; }
 		public string Message { get; set; } = string.Empty;
-		// Garage entry ID, master catalog ID nahi. Purane clients ke liye optional hai.
+		// New chat ki selection; existing chat mein sirf conflict check, actual selection SQL se.
 		[Range(1, int.MaxValue)]
 		public int? UserBikeId { get; set; }
 		// General explicitly select hua hai; existing bike chat mein missing ID se ye alag hai.

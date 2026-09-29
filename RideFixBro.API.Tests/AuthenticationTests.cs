@@ -24,7 +24,7 @@ namespace RideFixBro.API.Tests
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client(authenticated: false);
 			using var response = post
-				? await client.PostAsJsonAsync(path, new { sessionId = "session", message = "Hi" })
+				? await client.PostAsJsonAsync(path, new { sessionId = 0, isGeneral = true, message = "Hi" })
 				: await client.GetAsync(path);
 			Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
 			Assert.Contains(response.Headers.WwwAuthenticate, header => header.Scheme == "Bearer");
@@ -138,21 +138,22 @@ namespace RideFixBro.API.Tests
 			{
 				["email"] = $"{AuthTestTokens.UserId:N}@example.test"
 			}));
+			var firstId = await factory.CreateChatAsync(first);
+			var secondId = await factory.CreateChatAsync(second);
 			using var firstReply = await first.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "shared", message = "My private question", userId = secondUser });
+				new { sessionId = firstId, message = "My private question", userId = secondUser });
 			using var secondReply = await second.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "shared", message = "Other question", userId = AuthTestTokens.UserId });
+				new { sessionId = secondId, message = "Other question", userId = AuthTestTokens.UserId });
 			Assert.Equal(HttpStatusCode.OK, firstReply.StatusCode);
 			Assert.Equal(HttpStatusCode.OK, secondReply.StatusCode);
 
-			var store = factory.Services.GetRequiredService<IChatHistoryStore>();
-			Assert.Equal(2, store.GetHistory($"{AuthTestTokens.UserId:D}:shared").Count);
-			Assert.Equal(2, store.GetHistory($"{secondUser:D}:shared").Count);
-			Assert.Empty(store.GetHistory("shared"));
-			Assert.Equal("My private question",
-				Assert.IsType<AutoGen.Core.TextMessage>(store.GetHistory($"{AuthTestTokens.UserId:D}:shared")[0]).Content);
-			Assert.Equal("Other question",
-				Assert.IsType<AutoGen.Core.TextMessage>(store.GetHistory($"{secondUser:D}:shared")[0]).Content);
+			Assert.Equal(2, factory.History(firstId).Count);
+			Assert.Equal(2, factory.History(secondId, secondUser).Count);
+			using var denied = await second.PostAsJsonAsync("/api/Chat/ask",
+				new { sessionId = firstId, message = "Try another user's chat" });
+			Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+			Assert.StartsWith("My private question", Assert.IsType<AutoGen.Core.TextMessage>(factory.History(firstId)[0]).Content);
+			Assert.StartsWith("Other question", Assert.IsType<AutoGen.Core.TextMessage>(factory.History(secondId, secondUser)[0]).Content);
 			using var scope = factory.Services.CreateScope();
 			Assert.Equal(2, await scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>().Users.CountAsync());
 		}

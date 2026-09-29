@@ -1,184 +1,216 @@
-﻿using AutoGen.Core;
+using AutoGen.Core;
 using OpenAI.Embeddings;
 using Qdrant.Client;
 using Qdrant.Client.Grpc;
 using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
-using System.ComponentModel;
+using System.Security.Cryptography;
 using System.Text;
 using UglyToad.PdfPig;
+using static Qdrant.Client.Grpc.Conditions;
 
-namespace RideFixBro.API.Services
+namespace RideFixBro.API.Services;
+
+// partial: AutoGen [Function] wale method ka contract/wrapper isi class ke generated part mein add karta hai.
+// Ek shared collection mein do tarah ke points hain:
+//   chunk    = PDF ke text ka tukda + uska embedding vector.
+//   manifest = ek ManualKey ka chhota record: kaunsi complete upload revision ab active hai.
+// ManualKey catalog ki stable identity hai; revision har upload ka naya version ID hai.
+public partial class VectorDbService
 {
-	public partial class VectorDbService
-	{
-		private readonly QdrantClient _qdrantClient;
-		private readonly EmbeddingClient _embeddingClient;
-		private readonly string _collectionName = "X440_Manual"; // DB ka naam
+    public const int MaxPdfBytes = 20 * 1024 * 1024;
+    private const int Dimensions = 3072;
+    private const int MaxPages = 1000;
+    private const int MaxChunks = 2000;
+    private readonly QdrantClient _qdrantClient;
+    private readonly EmbeddingClient _embeddingClient;
+    private readonly string _collectionName;
+    // Same process mein ek upload; multiple app instances ke liye controller SQL publication lock bhi leta hai.
+    private readonly SemaphoreSlim _uploadGate = new(1, 1);
 
-		internal VectorDbService(QdrantClient qdrantClient, EmbeddingClient embeddingClient)
-		{
-			_qdrantClient = qdrantClient;
-			_embeddingClient = embeddingClient;
-		}
+    public VectorDbService(IConfiguration config)
+    {
+        var host = config["Qdrant_Vector_DB:Cluster_Endpoint"];
+        var key = config["Qdrant_Vector_DB:API_Key"];
+        var geminiKey = config["API_Keys:Gemini_Api_key"];
+        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(geminiKey))
+            throw new InvalidOperationException("Qdrant and Gemini credentials are required.");
+        var collectionName = config["Qdrant_Vector_DB:ManualCollection"];
+        if (string.IsNullOrWhiteSpace(collectionName))
+            throw new InvalidOperationException("Qdrant_Vector_DB:ManualCollection is required.");
+        // Collection ek explicit config value hai, bike name se derive/default nahi hoti.
+        _collectionName = collectionName;
+        _qdrantClient = new QdrantClient(host: host, https: true, apiKey: key,
+            grpcTimeout: TimeSpan.FromSeconds(ApiTimeouts.Seconds));
+        _embeddingClient = OpenAIClientBuilder.Create(geminiKey).GetEmbeddingClient("gemini-embedding-2-preview");
+    }
 
-		public VectorDbService(IConfiguration config)
-		{
-			var qdrantEndpoint = config["Qdrant_Vector_DB:Cluster_Endpoint"];
-			var qdrantApiKey = config["Qdrant_Vector_DB:API_Key"];
-			var geminiApiKey = config["API_Keys:Gemini_Api_key"];
+    // Ye real method hi [Function] hai, dummy overload nahi. MechanicBroAgent generated schema se key/token hata kar
+    // sirf userQuery model ko dikhata hai; custom execution map owned chat ki key aur HTTP cancellation token deta hai.
+    /// <summary>
+    /// Search the selected motorcycle's verified manual for technical details.
+    /// Manual identity is supplied by the server, not by the model.
+    /// </summary>
+    /// <param name="userQuery">Question to look up in the selected manual.</param>
+    /// <param name="manualKey">Trusted ManualKey from the selected catalog entry.</param>
+    /// <param name="cancellationToken">Server request cancellation signal.</param>
+    [Function]
+    public async Task<string> SearchManualAsync(string userQuery, string manualKey, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userQuery);
+        ArgumentException.ThrowIfNullOrWhiteSpace(manualKey);
+        var revision = await GetPublishedRevisionAsync(manualKey, cancellationToken);
+        if (revision is null)
+            return "No published manual exists for this catalog entry. Do not use another model/year's manual.";
+        return await SearchRevisionAsync(userQuery, manualKey, revision, cancellationToken);
+    }
 
-			if (string.IsNullOrEmpty(qdrantEndpoint) || string.IsNullOrEmpty(qdrantApiKey))
-			{
-				throw new Exception("Bhai, Qdrant ki keys check kar appsettings mein, missing hain!");
-			}
-			if (string.IsNullOrEmpty(geminiApiKey))
-			{
-				throw new Exception("Bhai, Gemini ki keys check kar appsettings mein, missing hain!");
-			}
+    private async Task<string?> GetPublishedRevisionAsync(string manualKey, CancellationToken token)
+    {
+        // Manifest se sirf active version read hota hai, PDF text/similarity search nahi.
+        var manifests = await _qdrantClient.RetrieveAsync(_collectionName, ManifestId(manualKey),
+            withPayload: true, cancellationToken: token);
+        var manifest = manifests.SingleOrDefault();
+        if (manifest is null) return null;
+        if (!manifest.Payload.TryGetValue("revision", out var revision) || string.IsNullOrWhiteSpace(revision.StringValue))
+            throw new InvalidOperationException("Manual publication metadata is invalid.");
+        return revision.StringValue;
+    }
 
-			// Qdrant Cloud se connection establish kar raha hai
-			_qdrantClient = new QdrantClient(host: qdrantEndpoint, https: true, apiKey: qdrantApiKey,
-				grpcTimeout: TimeSpan.FromSeconds(ApiTimeouts.Seconds));
+    private async Task<string> SearchRevisionAsync(string query, string manualKey, string revision, CancellationToken token)
+    {
+        var embedding = await _embeddingClient.GenerateEmbeddingAsync(query, cancellationToken: token);
+        // Key + active revision + chunk: doosri bikes, incomplete uploads aur manifest results se excluded hain.
+        var results = await _qdrantClient.QueryAsync(_collectionName, embedding.Value.ToFloats().ToArray(),
+            filter: new Filter { Must = { MatchKeyword("manual_key", manualKey), MatchKeyword("revision", revision),
+                MatchKeyword("kind", "chunk") } },
+            limit: 3, cancellationToken: token);
+        var passages = results.Where(result => result.Payload.TryGetValue("text", out var value) &&
+            !string.IsNullOrWhiteSpace(value.StringValue)).Select(result => result.Payload["text"].StringValue).ToArray();
+        return passages.Length > 0 ? string.Join("\n---\n", passages) :
+            "No relevant manual passages were found. Do not present general advice as a verified manual specification.";
+    }
 
-			// Gemini Embedding Client Setup (OpenAI proxy)
-			var openAIClient = OpenAIClientBuilder.Create(geminiApiKey);
+    public async Task<ManualUploadResult> ReplaceManualAsync(byte[] pdf, string manualKey, int skipPages, CancellationToken token)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(manualKey);
+        if (!await _uploadGate.WaitAsync(0, token))
+            throw new ChatInputException("Another manual upload is running. Retry afterwards.", 409);
+        try
+        {
+            // Parse -> stage -> publish -> cleanup. Publish se pehle failure aaye toh old manual active rehti hai.
+            var chunks = ExtractChunks(pdf, skipPages, token);
+            var revision = Guid.NewGuid().ToString("N");
+            await EnsureCollectionAsync(token);
+            await UploadChunksAsync(manualKey, revision, chunks, token);
+            await PublishRevisionAsync(manualKey, revision, token);
+            await RemoveOldRevisionsAsync(manualKey, revision, token);
+            return new(manualKey, chunks.Count, skipPages);
+        }
+        finally { _uploadGate.Release(); }
+    }
 
-			// Gemini ka text-embedding model (Dhyan rakhna, chat model alag hota hai, embedding model alag)
-			_embeddingClient = openAIClient.GetEmbeddingClient("gemini-embedding-2-preview");
-		}
+    private async Task EnsureCollectionAsync(CancellationToken token)
+    {
+        var collections = await _qdrantClient.ListCollectionsAsync(cancellationToken: token);
+        if (!collections.Contains(_collectionName))
+            await _qdrantClient.CreateCollectionAsync(_collectionName,
+                new VectorParams { Size = Dimensions, Distance = Distance.Cosine }, cancellationToken: token);
+        // Strict-mode filtering needs these Qdrant payload indexes, not SQL indexes.
+        foreach (var field in new[] { "manual_key", "revision", "kind" })
+            await _qdrantClient.CreatePayloadIndexAsync(_collectionName, field, PayloadSchemaType.Keyword,
+                wait: true, cancellationToken: token);
+    }
 
-		// Yeh function manual ke text ko DB mein daalega
-		public async Task<string> UploadManualChunkAsync(string sectionId, string text)
-		{
-			try
-			{
-				// 1. Pehle check karo DB (Collection) exist karti hai ya nahi?
-				var collections = await _qdrantClient.ListCollectionsAsync();
-				if (!collections.Contains(_collectionName))
-				{
-					// gemini-embedding-2-preview ka dimension 3072 hota hai
-					await _qdrantClient.CreateCollectionAsync(_collectionName, new VectorParams { Size = 3072, Distance = Distance.Cosine });
-				}
+    private async Task UploadChunksAsync(string manualKey, string revision, IReadOnlyList<string> chunks, CancellationToken token)
+    {
+        for (var index = 0; index < chunks.Count; index++)
+        {
+            token.ThrowIfCancellationRequested();
+            var embedding = await _embeddingClient.GenerateEmbeddingAsync(chunks[index], cancellationToken: token);
+            await _qdrantClient.UpsertAsync(_collectionName, new[]
+            {
+                new PointStruct
+                {
+                    Id = Guid.NewGuid(), Vectors = embedding.Value.ToFloats().ToArray(),
+                    Payload = { ["manual_key"] = manualKey, ["revision"] = revision, ["kind"] = "chunk",
+                        ["text"] = chunks[index], ["chunk_number"] = index + 1 }
+                }
+            }, wait: true, cancellationToken: token);
+        }
+    }
 
-				// 2. Gemini se Text ka Vector (Embedding) nikaalo
-				var embeddingResponse = await _embeddingClient.GenerateEmbeddingAsync(text);
-				var vectorArray = embeddingResponse.Value.ToFloats().ToArray();
+    private Task PublishRevisionAsync(string manualKey, string revision, CancellationToken token) =>
+        // One metadata point is the publication switch. Its zero vector is excluded by kind=chunk.
+        _qdrantClient.UpsertAsync(_collectionName, new[]
+        {
+            new PointStruct
+            {
+                Id = ManifestId(manualKey), Vectors = new float[Dimensions],
+                Payload = { ["manual_key"] = manualKey, ["revision"] = revision, ["kind"] = "manifest" }
+            }
+        }, wait: true, cancellationToken: token);
 
-				// 3. Qdrant mein Data aur Text dono save karo (Payload matlab Metadata)
-				var point = new PointStruct
-				{
-					Id = (ulong)sectionId.GetHashCode(), // Unique ID banayi
-					Vectors = vectorArray,
-					Payload = { ["text"] = text, ["bike"] = "Harley_X440" } // Yeh text wapas aayega jab hum search marenge
-				};
+    private Task RemoveOldRevisionsAsync(string manualKey, string revision, CancellationToken token) =>
+        // Same-key older/incomplete versions only; other keys and untagged legacy points stay untouched.
+        // Cleanup failure surfaces as an error, but reads still use only the published revision.
+        _qdrantClient.DeleteAsync(_collectionName, new Filter
+        {
+            Must = { MatchKeyword("manual_key", manualKey) },
+            MustNot = { MatchKeyword("revision", revision) }
+        }, wait: true, cancellationToken: token);
 
-				await _qdrantClient.UpsertAsync(_collectionName, [point]);
+    // Same key ka hamesha same metadata ID; text chunks ke random IDs se alag, yahan prefixed key ka hash use hota hai.
+    // Ye sirf deterministic lookup ID hai, password/security hashing ka use case nahi.
+    internal static Guid ManifestId(string key) =>
+        new(SHA256.HashData(Encoding.UTF8.GetBytes("ridefix-manual:" + key)).AsSpan(0, 16));
 
-				return $"Bhai, '{sectionId}' wala chunk successfully Qdrant mein upload ho gaya!";
-			}
-			catch (Exception ex)
-			{
-				throw new Exception($"Panga ho gaya upload mein: {ex.Message}");
-			}
-		}
-
-		// PDF Process karne ka Main Function
-		public async Task<string> ProcessAndUploadPdfAsync(string filePath)
-		{
-			if (!File.Exists(filePath)) return "Bhai, file hi nahi mili is path pe!";
-
-			StringBuilder fullText = new StringBuilder();
-
-			try
-			{
-				// 1. PDF Read kar rahe hain
-				using (PdfDocument document = PdfDocument.Open(filePath))
-				{
-					// Shuru ke 7 pages index maan ke skip kar rahe hain (Apne hisaab se change kar lena)
-					for (int i = 8; i <= document.NumberOfPages; i++)
-					{
-						var page = document.GetPage(i);
-						fullText.Append(page.Text).Append(" ");
-					}
-				}
-
-				var allText = fullText.ToString();
-
-				// 2. Text ko 300 words ke chunks (tukdon) mein tod rahe hain
-				var chunks = GetWordChunks(allText, 300);
-				int successCount = 0;
-
-				// 3. Loop chala ke Qdrant mein upload maar rahe hain
-				for (int i = 0; i < chunks.Count; i++)
-				{
-					string chunkId = $"manual_page_{i + 1}"; // Unique ID banayi
-
-					// Apna purana upload wala function call kiya
-					await UploadManualChunkAsync(chunkId, chunks[i]);
-					successCount++;
-
-					// PRO TIP: Google se ban hone se bachne ke liye 1.5 seconds ka delay
-					await Task.Delay(1500);
-				}
-
-				return $"Aag laga di bhai! PDF se {successCount} chunks DB mein daal diye.";
-			}
-			catch (Exception ex)
-			{
-				throw new Exception ($"Bhai PDF parse karne mein aag lag gayi: {ex.Message}");
-			}
-		}
-
-		// User ki query ko Qdrant mein search karne ke liye
-		[Function]
-		[Description("Motorcycle ki manual, technical repair steps, torque specs, ya error codes search karne ke liye is tool ka use karein. (e.g. 'X440 spark plug replacement')")]
-		public Task<string> SearchManualAsync(
-			[Description("Search query jo DB mein dhoondhni hai")] string userQuery)
-		{
-			return SearchManualAsync(userQuery, CancellationToken.None);
-		}
-
-		public async Task<string> SearchManualAsync(string userQuery, CancellationToken cancellationToken)
-		{
-			ArgumentException.ThrowIfNullOrWhiteSpace(userQuery);
-			var embeddingResponse = await _embeddingClient.GenerateEmbeddingAsync(userQuery, cancellationToken: cancellationToken);
-			var queryVector = embeddingResponse.Value.ToFloats().ToArray();
-			var searchResults = await _qdrantClient.QueryAsync(
-				collectionName: _collectionName,
-				query: queryVector,
-				limit: 3,
-				cancellationToken: cancellationToken
-			);
-
-			var contextText = new StringBuilder();
-			foreach (var result in searchResults)
-			{
-				if (result.Payload.TryGetValue("text", out var textValue) &&
-					!string.IsNullOrWhiteSpace(textValue.StringValue))
-				{
-					contextText.AppendLine(textValue.StringValue);
-					contextText.AppendLine("---");
-				}
-			}
-
-			return contextText.Length > 0
-				? contextText.ToString()
-				: "No relevant manual passages were found. Do not present general advice as a verified manual specification.";
-		}
-
-		// Helper Function: Text ko words ke hisaab se todne ke liye
-		private List<string> GetWordChunks(string text, int wordsPerChunk)
-		{
-			var words = text.Split(new[] { ' ', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-			var chunks = new List<string>();
-
-			for (int i = 0; i < words.Length; i += wordsPerChunk)
-			{
-				// 300 words ka ek block bana ke list mein daal rahe hain
-				chunks.Add(string.Join(" ", words.Skip(i).Take(wordsPerChunk)));
-			}
-			return chunks;
-		}
-	}
+    internal static List<string> ExtractChunks(byte[] pdf, int skipPages, CancellationToken token)
+    {
+        if (pdf.Length == 0 || pdf.Length > MaxPdfBytes)
+            throw new ChatInputException("PDF must be between 1 byte and 20 MiB.", 413);
+        if (pdf.Length < 5 || Encoding.ASCII.GetString(pdf, 0, 5) != "%PDF-")
+            throw new ChatInputException("Upload a valid PDF file.");
+        if (skipPages < 0) throw new ChatInputException("skipPages cannot be negative.");
+        var chunks = new List<string>();
+        try
+        {
+            using var document = PdfDocument.Open(pdf);
+            if (document.NumberOfPages > MaxPages)
+                throw new ChatInputException($"PDF exceeds the {MaxPages}-page limit.", 413);
+            if (skipPages >= document.NumberOfPages)
+                throw new ChatInputException("skipPages must leave at least one page.");
+            // PDF pages 1-based hain: skipPages=7 ka matlab physical page 8 se shuru.
+            // Har 300 extracted words ka chunk banta hai; page boundary par chunk todna zaroori nahi.
+            var words = new List<string>(300);
+            for (var page = skipPages + 1; page <= document.NumberOfPages; page++)
+            {
+                token.ThrowIfCancellationRequested();
+                // Sirf PDF text layer read hoti hai. Images/diagrams embed ya OCR nahi kar rahe.
+                foreach (var word in document.GetPage(page).GetWords())
+                {
+                    words.Add(word.Text);
+                    if (words.Count == 300)
+                    {
+                        chunks.Add(string.Join(" ", words));
+                        words.Clear();
+                        if (chunks.Count > MaxChunks)
+                            throw new ChatInputException("PDF contains too much text; split the manual.", 413);
+                    }
+                }
+            }
+            if (words.Count > 0) chunks.Add(string.Join(" ", words));
+            if (chunks.Count > MaxChunks)
+                throw new ChatInputException("PDF contains too much text; split the manual.", 413);
+        }
+        catch (UglyToad.PdfPig.Core.PdfDocumentFormatException)
+        {
+            throw new ChatInputException("PDF is malformed, encrypted, or unsupported.");
+        }
+        if (chunks.Count == 0)
+            throw new ChatInputException("No extractable text remains. Scanned/image-only PDFs require OCR before upload.");
+        return chunks;
+    }
 }
+
+public record ManualUploadResult(string ManualKey, int Chunks, int SkippedPages);

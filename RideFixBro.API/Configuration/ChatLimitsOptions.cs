@@ -6,8 +6,6 @@ namespace RideFixBro.API.Configuration
 
 		public int MaxMessageCharacters { get; set; } = 2000;
 
-		public int MaxSessionIdCharacters { get; set; } = 128;
-
 		public int MaxImageBytes { get; set; } = 2 * 1024 * 1024;
 
 		public int MaxImagePixels { get; set; } = 4096 * 4096;
@@ -27,7 +25,6 @@ namespace RideFixBro.API.Configuration
 		public void Validate()
 		{
 			ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxMessageCharacters);
-			ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSessionIdCharacters);
 			ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxImageBytes);
 			ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxImagePixels);
 			ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRequestBodyBytes);

@@ -1,6 +1,9 @@
 package com.example.ridefixbro.model.response
 
-// .NET se aane wala JSON response ({"reply": "Bhai meri baat sun..."})
+// sessionId ko next request mein use karo; 0 sirf new chat ke liye hai.
 data class ChatResponse(
-    val reply: String
+    val reply: String,
+    val sessionId: Int
 )
+
+data class ChatErrorResponse(val sessionId: Int?)

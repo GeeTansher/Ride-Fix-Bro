@@ -9,18 +9,17 @@ namespace RideFixBro.API.Tests
 		public void AcceptsTwoThousandCharactersAndRejectsOneMore()
 		{
 			var validator = new ChatInputValidator(new ChatLimitsOptions());
-			Assert.Null(validator.Validate("session", new string('a', 2000), null));
+			Assert.Null(validator.Validate(new string('a', 2000), null).ImageDataUri);
 			Assert.Equal(400, Assert.Throws<ChatInputException>(
-				() => validator.Validate("session", new string('a', 2001), null)).StatusCode);
+				() => validator.Validate(new string('a', 2001), null)).StatusCode);
 		}
 
 		[Fact]
-		public void SessionIdCannotBeEmptyOrUnbounded()
+		public void MessageCannotBeEmpty()
 		{
 			var validator = new ChatInputValidator(new ChatLimitsOptions());
-			Assert.Null(validator.Validate(new string('a', 128), "Hi", null));
-			Assert.Throws<ChatInputException>(() => validator.Validate(new string('a', 129), "Hi", null));
-			Assert.Throws<ChatInputException>(() => validator.Validate(" ", "Hi", null));
+			Assert.Throws<ChatInputException>(() => validator.Validate("", null));
+			Assert.Throws<ChatInputException>(() => validator.Validate(" ", null));
 		}
 
 		[Theory]
@@ -33,9 +32,9 @@ namespace RideFixBro.API.Tests
 			var validator = new ChatInputValidator(new ChatLimitsOptions());
 			var expected = $"data:{mimeType};base64,{encoded}";
 
-			Assert.Equal(expected, validator.Validate("session", "Photo", encoded));
-			Assert.Equal(expected, validator.Validate("session", "Photo", expected));
-			Assert.Equal(expected, validator.Validate("session", "Photo", $" \r\n{encoded}\n"));
+			Assert.Equal(expected, validator.Validate("Photo", encoded).ImageDataUri);
+			Assert.Equal(expected, validator.Validate("Photo", expected).ImageDataUri);
+			Assert.Equal(expected, validator.Validate("Photo", $" \r\n{encoded}\n").ImageDataUri);
 		}
 
 		[Theory]
@@ -49,7 +48,7 @@ namespace RideFixBro.API.Tests
 		{
 			var validator = new ChatInputValidator(new ChatLimitsOptions());
 			Assert.Equal(400, Assert.Throws<ChatInputException>(
-				() => validator.Validate("session", "Photo", image)).StatusCode);
+				() => validator.Validate("Photo", image)).StatusCode);
 		}
 
 		[Fact]
@@ -57,9 +56,9 @@ namespace RideFixBro.API.Tests
 		{
 			var validator = new ChatInputValidator(new ChatLimitsOptions());
 			var image = ImageFixtures.Png();
-			Assert.Throws<ChatInputException>(() => validator.Validate("session", "Photo",
+			Assert.Throws<ChatInputException>(() => validator.Validate("Photo",
 				$"data:image/jpeg;base64,{Convert.ToBase64String(image)}"));
-			Assert.Throws<ChatInputException>(() => validator.Validate("session", "Photo",
+			Assert.Throws<ChatInputException>(() => validator.Validate("Photo",
 				Convert.ToBase64String(image[..40])));
 		}
 
@@ -70,11 +69,11 @@ namespace RideFixBro.API.Tests
 			var validator = new ChatInputValidator(limits);
 			var image = ImageFixtures.Png(2 * 1024 * 1024);
 			Assert.Equal(2 * 1024 * 1024, image.Length);
-			Assert.NotNull(validator.Validate("session", "Photo", Convert.ToBase64String(image)));
+			Assert.NotNull(validator.Validate("Photo", Convert.ToBase64String(image)).ImageDataUri);
 
 			var tooLarge = ImageFixtures.Png(2 * 1024 * 1024 + 1);
 			Assert.Equal(413, Assert.Throws<ChatInputException>(
-				() => validator.Validate("session", "Photo", Convert.ToBase64String(tooLarge))).StatusCode);
+				() => validator.Validate("Photo", Convert.ToBase64String(tooLarge))).StatusCode);
 		}
 
 		[Fact]
@@ -83,7 +82,7 @@ namespace RideFixBro.API.Tests
 			var validator = new ChatInputValidator(new ChatLimitsOptions());
 			var image = ImageFixtures.PngWithOversizedDimensions();
 			Assert.Equal(413, Assert.Throws<ChatInputException>(
-				() => validator.Validate("session", "Photo", Convert.ToBase64String(image))).StatusCode);
+				() => validator.Validate("Photo", Convert.ToBase64String(image))).StatusCode);
 		}
 
 		[Fact]

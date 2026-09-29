@@ -4,5 +4,6 @@ data class UserProfileResponse(
     val id: Int,
     val supabaseUserId: String,
     val email: String,
-    val role: String
+    val role: String,
+    val name: String? = null
 )

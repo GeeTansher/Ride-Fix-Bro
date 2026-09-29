@@ -1,4 +1,5 @@
 using RideFixBro.API.Configuration;
+using RideFixBro.API.Models;
 using StbImageSharp;
 
 namespace RideFixBro.API.Services
@@ -12,18 +13,14 @@ namespace RideFixBro.API.Services
 			_limits = limits;
 		}
 
-		public string? Validate(string sessionId, string message, string? imageData)
+		public ChatInput Validate(string message, string? imageData)
 		{
-			if (string.IsNullOrWhiteSpace(sessionId) || sessionId.Length > _limits.MaxSessionIdCharacters)
-			{
-				throw new ChatInputException($"Bhai, SessionId 1 se {_limits.MaxSessionIdCharacters} characters ka hona chahiye.");
-			}
 			if (string.IsNullOrWhiteSpace(message) || message.Length > _limits.MaxMessageCharacters)
 			{
 				throw new ChatInputException($"Bhai, message 1 se {_limits.MaxMessageCharacters} characters ka rakh.");
 			}
 
-			return ValidateImage(imageData);
+			return new ChatInput(message, ValidateImage(imageData));
 		}
 
 		private string? ValidateImage(string? imageData)

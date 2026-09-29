@@ -20,7 +20,7 @@ namespace RideFixBro.API.Services
 		public Task<List<GarageBikeResponse>> GetGarageAsync(int userId, CancellationToken cancellationToken)
 		{
 			return _database.UserBikes.AsNoTracking().Where(bike =>
-					bike.UserId == userId && !EF.Property<bool>(bike, "IsDeleted"))
+					bike.UserId == userId && !bike.IsDeleted)
 				.OrderBy(bike => bike.Id)
 				.Select(bike => new GarageBikeResponse(
 					bike.Id, bike.BikeId, bike.Bike.Make, bike.Bike.Model, bike.Bike.Year, bike.CreatedAt))
@@ -33,7 +33,7 @@ namespace RideFixBro.API.Services
 			var existing = await FindAsync(userId, bikeId, cancellationToken);
 			if (existing is not null)
 			{
-				_database.Entry(existing).Property<bool>("IsDeleted").CurrentValue = false;
+				existing.IsDeleted = false;
 				await _database.SaveChangesAsync(cancellationToken);
 				return (ToResponse(existing), false);
 			}
@@ -68,7 +68,7 @@ namespace RideFixBro.API.Services
 				{
 					throw;
 				}
-				_database.Entry(existing).Property<bool>("IsDeleted").CurrentValue = false;
+				existing.IsDeleted = false;
 				await _database.SaveChangesAsync(cancellationToken);
 				return (ToResponse(existing), false);
 			}
@@ -79,18 +79,9 @@ namespace RideFixBro.API.Services
 			var bike = await _database.UserBikes
 				.SingleOrDefaultAsync(row => row.Id == garageBikeId && row.UserId == userId, cancellationToken);
 			if (bike is null) return false;
-			_database.Entry(bike).Property<bool>("IsDeleted").CurrentValue = true;
+			bike.IsDeleted = true;
 			await _database.SaveChangesAsync(cancellationToken);
 			return true;
-		}
-
-		public async Task<GarageBikeResponse?> GetForChatAsync(
-			int userId, int garageBikeId, bool includeDeleted, CancellationToken cancellationToken)
-		{
-			var bike = await _database.UserBikes.AsNoTracking().Include(row => row.Bike)
-				.SingleOrDefaultAsync(row => row.Id == garageBikeId && row.UserId == userId &&
-					(includeDeleted || !EF.Property<bool>(row, "IsDeleted")), cancellationToken);
-			return bike is null ? null : ToResponse(bike);
 		}
 
 		private Task<UserBike?> FindAsync(int userId, int bikeId, CancellationToken cancellationToken)

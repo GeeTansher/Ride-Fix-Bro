@@ -79,8 +79,7 @@ namespace RideFixBro.API.Tests
 			var bike = await AddBike(owner, 101);
 			using var deleted = await other.DeleteAsync($"/api/garage/{bike.Id}");
 			Assert.Equal(HttpStatusCode.NotFound, deleted.StatusCode);
-			using var chat = await other.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "other", userBikeId = bike.Id, message = "Hi" });
+			using var chat = await other.PostAsJsonAsync("/api/Chat/ask", new { sessionId = 0, userBikeId = bike.Id, message = "Hi" });
 			Assert.Equal(HttpStatusCode.NotFound, chat.StatusCode);
 			Assert.Equal(0, factory.Agent.Calls);
 			Assert.Single((await owner.GetFromJsonAsync<List<GarageBikeResponse>>("/api/garage"))!);
@@ -103,50 +102,27 @@ namespace RideFixBro.API.Tests
 			await SeedCatalog(factory);
 			var firstBike = await AddBike(client, 101);
 			var secondBike = await AddBike(client, 102);
+			var id = await factory.CreateChatAsync(client, firstBike.Id);
 			using var first = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "locked", userBikeId = firstBike.Id, message = "First" });
+				new { sessionId = id, userBikeId = firstBike.Id, message = "First" });
 			Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 			using var changed = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "locked", userBikeId = secondBike.Id, message = "Changed" });
+				new { sessionId = id, userBikeId = secondBike.Id, message = "Changed" });
 			Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
 			using var generalSwitch = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "locked", isGeneral = true, message = "Change to General" });
+				new { sessionId = id, isGeneral = true, message = "Change to General" });
 			Assert.Equal(HttpStatusCode.Conflict, generalSwitch.StatusCode);
 			Assert.Equal(1, factory.Agent.Calls);
 
 			using var removed = await client.DeleteAsync($"/api/garage/{firstBike.Id}");
 			Assert.Equal(HttpStatusCode.NoContent, removed.StatusCode);
 			using var followUp = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "locked", message = "Follow-up without repeated bike ID" });
+				new { sessionId = id, message = "Follow-up without repeated bike ID" });
 			Assert.Equal(HttpStatusCode.OK, followUp.StatusCode);
-			using var newChat = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "new", userBikeId = firstBike.Id, message = "New" });
+			using var newChat = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = 0, userBikeId = firstBike.Id, message = "Hi" });
 			Assert.Equal(HttpStatusCode.NotFound, newChat.StatusCode);
-			var history = factory.Services.GetRequiredService<IChatHistoryStore>();
-			Assert.Equal(firstBike.Id, history.GetSelectedBikeId($"{AuthTestTokens.UserId:D}:locked"));
-			var message = Assert.IsType<TextMessage>(history.GetHistory($"{AuthTestTokens.UserId:D}:locked")[0]);
+			var message = Assert.IsType<TextMessage>(factory.History(id)[0]);
 			Assert.Contains("Harley-Davidson X440, year 2024", message.Content);
-		}
-
-		[Fact]
-		public async Task InFlightTurnCannotBeReboundToAnotherBike()
-		{
-			var store = new InMemoryChatStore();
-			var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-			var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-			var first = store.UpdateHistoryAsync("user:chat", async history =>
-			{
-				entered.SetResult();
-				await release.Task;
-				return "done";
-			}, userBikeId: 1);
-			await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-			var second = store.UpdateHistoryAsync("user:chat", history => Task.FromResult("wrong bike"), userBikeId: 2);
-			release.SetResult();
-			await first;
-			var error = await Assert.ThrowsAsync<ChatInputException>(() => second);
-			Assert.Equal(409, error.StatusCode);
-			Assert.Equal(1, store.GetSelectedBikeId("user:chat"));
 		}
 
 		[Fact]
@@ -162,8 +138,7 @@ namespace RideFixBro.API.Tests
 			});
 			var manager = ToolFlowTests.CreateManager(agent, new InMemoryChatStore());
 			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(
-				AuthTestTokens.UserId, "new-bike", "Specs", selectedBike:
-					new GarageBikeResponse(2, 102, "Another make", "Another model", 2025, DateTime.UtcNow)));
+				new ChatContext(1, new BikeContext(2, "Another make", "Another model", 2025, null)), new ChatInput("Specs", null)));
 			Assert.Equal(0, calls);
 			var tools = handler.Requests[0].GetProperty("tools").EnumerateArray()
 				.Select(tool => tool.GetProperty("function").GetProperty("name").GetString());
@@ -175,21 +150,19 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 
 			using var general = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "general", isGeneral = true, message = "Hi" });
+				new { sessionId = id, isGeneral = true, message = "Hi" });
 			Assert.Equal(HttpStatusCode.OK, general.StatusCode);
 			using var changed = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "general", userBikeId = 1, message = "Change to bike" });
+				new { sessionId = id, userBikeId = 1, message = "Change to bike" });
 			Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
 
 			using var followUp = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "general", message = "Continue General" });
+				new { sessionId = id, message = "Continue General" });
 			Assert.Equal(HttpStatusCode.OK, followUp.StatusCode);
-			var history = factory.Services.GetRequiredService<IChatHistoryStore>();
-			Assert.True(history.IsGeneralSession($"{AuthTestTokens.UserId:D}:general"));
-			Assert.Null(history.GetSelectedBikeId($"{AuthTestTokens.UserId:D}:general"));
-			var latestUser = Assert.IsType<TextMessage>(history.GetHistory($"{AuthTestTokens.UserId:D}:general")[2]);
+			var latestUser = Assert.IsType<TextMessage>(factory.History(id)[2]);
 			Assert.Contains("General chat: no motorcycle is selected", latestUser.Content);
 			Assert.Equal(2, factory.Agent.Calls);
 		}
@@ -199,50 +172,44 @@ namespace RideFixBro.API.Tests
 		{
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
+			var id = await factory.CreateChatAsync(client);
 			factory.Agent.Reply = _ => throw new InvalidOperationException("Provider unavailable");
 			using var failed = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "failed-general", isGeneral = true, message = "Hi" });
+				new { sessionId = id, isGeneral = true, message = "Hi" });
 			Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
-			var history = factory.Services.GetRequiredService<IChatHistoryStore>();
-			var key = $"{AuthTestTokens.UserId:D}:failed-general";
-			Assert.Empty(history.GetHistory(key));
-			Assert.True(history.IsGeneralSession(key));
+			Assert.Empty(factory.History(id));
 
 			using var changed = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "failed-general", userBikeId = 1, message = "Change to bike" });
+				new { sessionId = id, userBikeId = 1, message = "Change to bike" });
 			Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
 			factory.Agent.Reply = _ => Task.FromResult<IMessage>(new TextMessage(Role.Assistant, "Answer", "MechanicBro"));
 			using var retry = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "failed-general", message = "Try again" });
+				new { sessionId = id, message = "Try again" });
 			Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
-			Assert.Equal(2, history.GetHistory(key).Count);
-			Assert.True(history.IsGeneralSession(key));
+			Assert.Equal(2, factory.History(id).Count);
 			Assert.Equal(2, factory.Agent.Calls);
 		}
 
 		[Theory]
 		[InlineData(true)]
 		[InlineData(false)]
-		public async Task InFlightTurnCannotSwitchBetweenGeneralAndBike(bool firstIsGeneral)
+		public async Task StoredSelectionCannotSwitchBetweenGeneralAndBike(bool firstIsGeneral)
 		{
-			var store = new InMemoryChatStore();
-			var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-			var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-			var first = store.UpdateHistoryAsync("user:chat", async history =>
+			await using var factory = new ChatApiFactory();
+			using var client = factory.Client();
+			await SeedCatalog(factory);
+			var bike = await AddBike(client, 101);
+			var id = await factory.CreateChatAsync(client, firstIsGeneral ? null : bike.Id);
+			using var changed = await client.PostAsJsonAsync("/api/Chat/ask", new
 			{
-				entered.SetResult();
-				await release.Task;
-				return "done";
-			}, userBikeId: firstIsGeneral ? null : 1, isGeneral: firstIsGeneral);
-			await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-			var second = store.UpdateHistoryAsync("user:chat", history => Task.FromResult("wrong selection"),
-				userBikeId: firstIsGeneral ? 1 : null, isGeneral: !firstIsGeneral);
-			release.SetResult();
-			await first;
-			var error = await Assert.ThrowsAsync<ChatInputException>(() => second);
-			Assert.Equal(409, error.StatusCode);
-			Assert.Equal(firstIsGeneral, store.IsGeneralSession("user:chat"));
-			Assert.Equal(firstIsGeneral ? (int?)null : 1, store.GetSelectedBikeId("user:chat"));
+				sessionId = id, message = "Change selection", isGeneral = !firstIsGeneral,
+				userBikeId = firstIsGeneral ? (int?)bike.Id : null
+			});
+			Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
+			Assert.Equal(0, factory.Agent.Calls);
+			using var scope = factory.Services.CreateScope();
+			var row = await scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>().ChatSessions.SingleAsync();
+			Assert.Equal(firstIsGeneral ? (int?)null : bike.Id, row.UserBikeId);
 		}
 
 		[Fact]
@@ -251,7 +218,7 @@ namespace RideFixBro.API.Tests
 			await using var factory = new ChatApiFactory();
 			using var client = factory.Client();
 			using var response = await client.PostAsJsonAsync("/api/Chat/ask",
-				new { sessionId = "invalid", isGeneral = true, userBikeId = 1, message = "Hi" });
+				new { sessionId = 0, isGeneral = true, userBikeId = 1, message = "Hi" });
 			Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 			Assert.Equal(0, factory.Agent.Calls);
 		}
@@ -270,7 +237,7 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			var reply = await ToolFlowTests.CreateManager(agent, store).AskMechanicBro(
-				AuthTestTokens.UserId, "general-web", "General question", isGeneral: true);
+				new ChatContext(1, null), new ChatInput("General question", null));
 			Assert.Equal("General answer", reply);
 			Assert.Equal(1, calls);
 			foreach (var request in handler.Requests)
@@ -279,7 +246,7 @@ namespace RideFixBro.API.Tests
 					.Select(tool => tool.GetProperty("function").GetProperty("name").GetString()).ToArray();
 				Assert.Equal(new[] { "SearchInternetAsync" }, tools);
 			}
-			Assert.True(store.IsGeneralSession($"{AuthTestTokens.UserId:D}:general-web"));
+			Assert.Contains("General chat", Assert.IsAssignableFrom<TextMessage>(store.GetHistory(1)[0]).Content);
 		}
 
 		[Fact]
@@ -295,10 +262,9 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			await Assert.ThrowsAsync<ChatLimitExceededException>(() => ToolFlowTests.CreateManager(agent, store)
-				.AskMechanicBro(AuthTestTokens.UserId, "general-manual", "Hi", isGeneral: true));
+				.AskMechanicBro(new ChatContext(1, null), new ChatInput("Hi", null)));
 			Assert.Equal(0, calls);
-			Assert.Empty(store.GetHistory($"{AuthTestTokens.UserId:D}:general-manual"));
-			Assert.True(store.IsGeneralSession($"{AuthTestTokens.UserId:D}:general-manual"));
+			Assert.Empty(store.GetHistory(1));
 		}
 
 		private static async Task<GarageBikeResponse> AddBike(HttpClient client, int bikeId)

@@ -6,7 +6,6 @@ using RideFixBro.API.Filters;
 using RideFixBro.API.Models;
 using RideFixBro.API.Services;
 using System.Security.Claims;
-using RideFixBro.API.DataStore.Interfaces;
 using System.Globalization;
 
 namespace RideFixBro.API.Controllers
@@ -14,7 +13,7 @@ namespace RideFixBro.API.Controllers
 	[ApiController]
 	[Route("api/[controller]")]
 	public class ChatController(AiManagerService aiManager, SemaphoreSlim chatSlots,
-		GarageService garage, IChatHistoryStore history, ILogger<ChatController> logger) : ControllerBase
+		ChatSessionService chats, ChatInputValidator inputValidator, ILogger<ChatController> logger) : ControllerBase
 	{
 		private readonly AiManagerService _aiManager = aiManager;
 		private readonly SemaphoreSlim _chatSlots = chatSlots;
@@ -33,41 +32,24 @@ namespace RideFixBro.API.Controllers
 				return StatusCode(429, new { Error = "Bhai, ek chat abhi chal rahi hai. Uske baad dobara try kar." });
 			}
 
+			int? assignedSessionId = null;
 			try
 			{
 				// AiManagerService ko message pass kiya
-				var userId = Guid.Parse(User.FindFirstValue("sub")!);
 				var appUserId = int.Parse(User.FindFirstValue("app_user_id")!, CultureInfo.InvariantCulture);
 				if (request.IsGeneral && request.UserBikeId.HasValue)
-				{
-					return BadRequest(new { Error = "General aur bike dono select nahi ho sakte." });
-				}
-				var historyKey = $"{userId:D}:{request.SessionId}";
-				var lockedBike = history.GetSelectedBikeId(historyKey);
-				var lockedGeneral = history.IsGeneralSession(historyKey);
-				var isGeneral = request.IsGeneral || lockedGeneral;
-				if ((isGeneral && lockedBike.HasValue) || (lockedGeneral && request.UserBikeId.HasValue))
-				{
-					return Conflict(new { Error = "Chat selection locked hai. Change karne ke liye New Chat kholo." });
-				}
-				if (lockedBike.HasValue && request.UserBikeId.HasValue && lockedBike != request.UserBikeId)
-				{
-					return Conflict(new { Error = "Bhai, bike locked hai. New Chat mein doosri bike select kar." });
-				}
-				var selectedBikeId = request.UserBikeId ?? lockedBike;
-				GarageBikeResponse? selectedBike = null;
-				if (selectedBikeId.HasValue)
-				{
-					selectedBike = await garage.GetForChatAsync(appUserId, selectedBikeId.Value,
-						includeDeleted: lockedBike == selectedBikeId, cancellationToken);
-					if (selectedBike is null)
-					{
-						return NotFound(new { Error = "Bhai, selected bike teri active garage mein nahi hai." });
-					}
-				}
-				var response = await _aiManager.AskMechanicBro(
-					userId, request.SessionId, request.Message, request.ImageData, cancellationToken, selectedBike, isGeneral);
-				return Ok(new { Reply = response });
+					throw new ChatInputException("Select either General or one garage bike.");
+				// Validate/decode once, before new chat creation; reuse the owned context for the entire turn.
+				var input = inputValidator.Validate(request.Message, request.ImageData);
+				var chat = request.SessionId == 0
+					? await chats.CreateAsync(appUserId, request.UserBikeId, request.IsGeneral, cancellationToken)
+					: await chats.GetContextAsync(appUserId, request.SessionId, cancellationToken);
+				assignedSessionId = chat.Id;
+				if ((request.UserBikeId.HasValue && request.UserBikeId != chat.Bike?.UserBikeId) ||
+					(request.IsGeneral && !chat.IsGeneral))
+					throw new ChatInputException("Chat selection locked hai. New Chat kholo.", 409);
+				var response = await _aiManager.AskMechanicBro(chat, input, cancellationToken);
+				return Ok(new { SessionId = chat.Id, Reply = response });
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{
@@ -76,18 +58,25 @@ namespace RideFixBro.API.Controllers
 			}
 			catch (ChatInputException ex)
 			{
-				return StatusCode(ex.StatusCode, new { Error = ex.Message });
+				return StatusCode(ex.StatusCode, new { Error = ex.Message, SessionId = assignedSessionId });
 			}
 			catch (ChatLimitExceededException ex)
 			{
-				return UnprocessableEntity(new { Error = ex.Message });
+				return UnprocessableEntity(new { Error = ex.Message, SessionId = assignedSessionId });
+			}
+			catch (Exception ex) when (ex is System.Data.Common.DbException or Microsoft.EntityFrameworkCore.DbUpdateException
+				or Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException)
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+				logger.LogError(ex, "Chat database operation failed.");
+				return StatusCode(503, new { Error = "Bhai, database abhi available nahi hai. Thodi der baad retry kar.", SessionId = assignedSessionId });
 			}
 			catch (Exception ex)
 			{
 				cancellationToken.ThrowIfCancellationRequested();
 				logger.LogError(ex, "Chat request failed.");
 				// Asli exception service logs mein hai; provider/internal details client ko mat bhej.
-				return StatusCode(500, new { Error = "Bhai, abhi answer nahi aa paaya. Thodi der baad dobara try kar." });
+				return StatusCode(500, new { Error = "Bhai, abhi answer nahi aa paaya. Thodi der baad dobara try kar.", SessionId = assignedSessionId });
 			}
 			finally
 			{

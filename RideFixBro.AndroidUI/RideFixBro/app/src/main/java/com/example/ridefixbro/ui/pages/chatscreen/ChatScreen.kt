@@ -25,13 +25,13 @@ import androidx.core.content.ContextCompat
 import com.example.ridefixbro.viewmodel.ChatViewModel
 import com.example.ridefixbro.viewmodel.ChatMessage
 import com.mikepenz.markdown.m3.Markdown
+import com.example.ridefixbro.model.GarageBike
+import com.example.ridefixbro.ui.pages.SelectionDropdown
 
 @Composable
-fun ChatScreen(viewModel: ChatViewModel, userId: String, enabled: Boolean) {
+fun ChatScreen(viewModel: ChatViewModel, userId: String, enabled: Boolean, garage: List<GarageBike>) {
     // ViewModel se data observe kar rahe hain. Data change hoga, UI automatically update hoga!
-    val messages by viewModel.messages.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
-    val draft by viewModel.draft.collectAsState()
+    val state by viewModel.state.collectAsState()
 
     // Camera open karne ka launcher
     val cameraLauncher = rememberLauncherForActivityResult(
@@ -59,25 +59,52 @@ fun ChatScreen(viewModel: ChatViewModel, userId: String, enabled: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            // systemBarsPadding top/bottom notch se bachane ke liye hota hai
-            .systemBarsPadding()
-            // YEH LINE ADD KARNI HAI BHAi:
             .imePadding()
             .padding(16.dp)
     ) {
+        SelectionDropdown(
+            if (state.selectionLocked) "Chat selection (locked)" else "Select General or a bike",
+            if (state.isGeneral) "General" else state.selectedBike?.label ?: "",
+            listOf("General") + garage.map { it.label },
+            enabled && !state.loading && !state.selectionLocked
+        ) { label ->
+            if (label == "General") {
+                viewModel.selectGeneral()
+            } else {
+                garage.firstOrNull { it.label == label }?.let { viewModel.selectBike(it.id) }
+            }
+        }
+        if (state.isGeneral) {
+            Text("General chat: No manual-backed or bike-specific details are guaranteed.",
+                style = MaterialTheme.typography.bodySmall)
+        }
+        if (state.selectionLocked) Text("Selection locked. Change karne ke liye New Chat kholo.",
+            style = MaterialTheme.typography.bodySmall)
+        state.selectionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        Spacer(Modifier.height(8.dp))
+        if (!state.hasSelection) {
+            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text("Choose General or a bike to start chatting.")
+            if (garage.isEmpty()) Text("You can add bikes from the sidebar.", style = MaterialTheme.typography.bodySmall)
+            return@Column
+        }
         // 1. Chat Messages Area (Yeh tera naya RecyclerView hai bina kisi adapter ke)
         LazyColumn(
             modifier = Modifier.weight(1f),
             reverseLayout = false
         ) {
-            items(messages) { msg ->
+            if (state.hasOlderMessages) item {
+                TextButton(onClick = viewModel::loadOlderMessages, enabled = enabled && !state.loading) { Text("Load older messages") }
+            }
+            items(state.messages) { msg ->
+                if (msg.photoNotStored) Text("Photo is not stored. Reattach it if needed.", style = MaterialTheme.typography.bodySmall)
                 MessageBubble(message = msg)
                 Spacer(modifier = Modifier.height(8.dp))
             }
         }
 
         // Agar user ne photo kheenchi hai toh ek chota sa indicator dikha do
-        if (draft.imageData != null) {
+        if (state.draft.imageData != null) {
             Text("📸 Photo ready! Message type kar aur bhej de...", color = MaterialTheme.colorScheme.primary)
             Spacer(modifier = Modifier.height(4.dp))
         }
@@ -89,7 +116,7 @@ fun ChatScreen(viewModel: ChatViewModel, userId: String, enabled: Boolean) {
         ) {
             // CAMERA BUTTON
             IconButton(
-                enabled = enabled && !isLoading,
+                enabled = enabled && !state.loading,
                 onClick = {
                     // Pehle check kar ki kya apne paas permission pehle se hai?
                     val hasPermission = ContextCompat.checkSelfPermission(
@@ -110,9 +137,10 @@ fun ChatScreen(viewModel: ChatViewModel, userId: String, enabled: Boolean) {
             }
 
             OutlinedTextField(
-                value = draft.text,
+                value = state.draft.text,
                 onValueChange = { viewModel.updateDraftText(it) },
                 modifier = Modifier.weight(1f),
+                enabled = enabled,
                 placeholder = { Text("Photo bhej ya type kar...") },
                 shape = RoundedCornerShape(24.dp)
             )
@@ -123,10 +151,10 @@ fun ChatScreen(viewModel: ChatViewModel, userId: String, enabled: Boolean) {
                 onClick = {
                     viewModel.sendDraft()
                 },
-                enabled = enabled && !isLoading && draft.text.isNotBlank(),
+                enabled = enabled && !state.loading && state.hasSelection && state.draft.text.isNotBlank(),
                 modifier = Modifier.background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50))
             ) {
-                if (!isLoading){
+                if (!state.loading){
                     Icon(Icons.Filled.Send, contentDescription = "Send", tint = Color.White)
                 }
                 else{

@@ -31,6 +31,7 @@ builder.Services.AddSingleton<ChatInputValidator>();
 builder.Services.AddSupabaseAuthentication(builder.Configuration);
 builder.Services.AddScoped<AppUserService>();
 builder.Services.AddScoped<GarageService>();
+builder.Services.AddScoped<ChatSessionService>();
 // free tier h to concurrent requests limit lagana padega; nahi toh Gemini ke free tier me 429 aa jayega, else anyone sponser!!
 builder.Services.AddSingleton<SemaphoreSlim>(_ =>
 	new SemaphoreSlim(chatLimits.MaxConcurrentRequests, chatLimits.MaxConcurrentRequests));
@@ -60,9 +61,9 @@ builder.Services.AddRateLimiter(options =>
 });
 
 // services
-builder.Services.AddScoped<RideFixBro.API.Services.AiManagerService>();
-builder.Services.AddSingleton<RideFixBro.API.Services.VectorDbService>();
-builder.Services.AddSingleton<IChatHistoryStore, InMemoryChatStore>();
+builder.Services.AddScoped<AiManagerService>();
+builder.Services.AddSingleton<VectorDbService>();
+builder.Services.AddScoped<IChatHistoryStore, SqlChatHistoryStore>();
 builder.Services.AddSingleton<ChatClient>(services =>
 {
 	var config = services.GetRequiredService<IConfiguration>();
@@ -131,6 +132,11 @@ app.Use(async (context, next) =>
 		{
 			Error = "Bhai, account database abhi available nahi hai. Thodi der baad retry kar."
 		}, context.RequestAborted);
+	}
+	catch (ChatInputException ex) when (!context.Response.HasStarted)
+	{
+		context.Response.StatusCode = ex.StatusCode;
+		await context.Response.WriteAsJsonAsync(new { Error = ex.Message }, context.RequestAborted);
 	}
 	catch (Exception ex) when (
 		(ex is DbException || ex is DbUpdateException || ex is RetryLimitExceededException) &&
