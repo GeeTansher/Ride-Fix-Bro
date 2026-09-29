@@ -1,6 +1,7 @@
 using AutoGen.Core;
 using RideFixBro.API.DataStore.Interfaces;
 using RideFixBro.API.Services;
+using RideFixBro.API.Models;
 
 namespace RideFixBro.API.Tests;
 
@@ -27,16 +28,17 @@ internal sealed class InMemoryChatStore : IChatHistoryStore
         }
     }
 
-    public Task AppendTurnAsync(int chatId, ChatHistorySnapshot previous, IReadOnlyList<IMessage> turn, CancellationToken token)
+    public Task<int> AppendTurnAsync(ChatContext chat, ChatHistorySnapshot previous, IReadOnlyList<IMessage> turn, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         lock (_gate)
         {
+            var chatId = chat.Id == 0 ? _turns.Keys.DefaultIfEmpty(0).Max() + 1 : chat.Id;
             if (!_turns.TryGetValue(chatId, out var turns)) _turns[chatId] = turns = [];
             if (turns.Count != previous.LastTurnNumber || turns.Sum(row => row.Length) != previous.LastSequenceNumber)
                 throw new ChatInputException("Another turn was saved. Reload before retrying.", 409);
             turns.Add(turn.ToArray());
+            return Task.FromResult(chatId);
         }
-        return Task.CompletedTask;
     }
 }

@@ -26,7 +26,7 @@ import java.io.InterruptedIOException
 
 data class ChatMessage(val text: String, val isUser: Boolean, val photoNotStored: Boolean = false)
 data class ChatDraft(val text: String = "", val imageData: String? = null)
-data class RecentChat(val id: Int, val title: String, val bikeLabel: String?)
+data class RecentChat(val id: Int, val title: String, val bikeLabel: String?, val updatedAt: String)
 data class ChatUiState(
     val chatId: Int? = null,
     val selectedBike: GarageBike? = null,
@@ -40,7 +40,8 @@ data class ChatUiState(
     val recentChats: List<RecentChat> = emptyList(),
     val recentLoading: Boolean = false,
     val historyError: String? = null,
-    val moreChats: Boolean = false
+    val moreChats: Boolean = false,
+    val deletingChatId: Int? = null
 ) {
     val hasSelection: Boolean get() = isGeneral || selectedBike != null
     val hasOlderMessages: Boolean get() = nextBeforeSequence != null
@@ -57,8 +58,10 @@ class ChatViewModel(
     private var sessionReady = false
     private var generation = 0
     private var recentGeneration = 0
+    private var deleteGeneration = 0
     private var chatJob: Job? = null
     private var recentJob: Job? = null
+    private var deleteJob: Job? = null
     private var garage: List<GarageBike> = emptyList()
     private val drafts = mutableMapOf<Int, ChatDraft>()
 
@@ -101,8 +104,10 @@ class ChatViewModel(
         if (activeUserId == userId) return
         chatJob?.cancel()
         recentJob?.cancel()
+        deleteJob?.cancel()
         generation++
         recentGeneration++
+        deleteGeneration++
         activeUserId = userId
         garage = emptyList()
         drafts.clear()
@@ -113,7 +118,7 @@ class ChatViewModel(
         generation++
         _state.update {
             ChatUiState(recentChats = it.recentChats, recentLoading = it.recentLoading,
-                historyError = it.historyError, moreChats = it.moreChats)
+                historyError = it.historyError, moreChats = it.moreChats, deletingChatId = it.deletingChatId)
         }
     }
 
@@ -166,16 +171,16 @@ class ChatViewModel(
         if (!sessionReady || (loadMore && (current.recentLoading || !current.moreChats))) return
         recentJob?.cancel()
         val requestGeneration = ++recentGeneration
-        val before = if (loadMore) current.recentChats.lastOrNull()?.id else null
+        val before = if (loadMore) current.recentChats.lastOrNull() else null
         recentJob = viewModelScope.launch {
             _state.update { it.copy(recentLoading = true, historyError = null) }
             var token: String? = null
             try {
                 token = auth.accessToken(userId)
-                val rows = sessionApi.chats("Bearer $token", before)
+                val rows = sessionApi.chats("Bearer $token", before?.id, before?.updatedAt)
                 currentCoroutineContext().ensureActive()
                 if (activeUserId != userId || recentGeneration != requestGeneration) return@launch
-                val page = rows.map { RecentChat(it.id, it.title, if (it.isGeneral) "General" else it.bike?.label) }
+                val page = rows.map { RecentChat(it.id, it.title, if (it.isGeneral) "General" else it.bike?.label, it.updatedAt) }
                 _state.update { it.copy(
                     recentChats = if (loadMore) (it.recentChats + page).distinctBy { chat -> chat.id } else page,
                     moreChats = rows.size == 50) }
@@ -199,11 +204,56 @@ class ChatViewModel(
         }
         val userId = activeUserId ?: return
         if (!sessionReady) return
+        if (_state.value.deletingChatId == id) return
         saveDraft()
         chatJob?.cancel()
         resetCurrentChat()
         _state.update { it.copy(chatId = id, selectionLocked = true, draft = drafts[id] ?: ChatDraft()) }
         fetchMessages(userId, id, null)
+    }
+
+    fun deleteChat(id: Int) {
+        val owner = activeUserId ?: return
+        if (!sessionReady || id <= 0 || _state.value.deletingChatId != null) return
+        val requestGeneration = ++deleteGeneration
+        recentJob?.cancel()
+        recentGeneration++
+        if (_state.value.chatId == id) {
+            chatJob?.cancel()
+            generation++
+        }
+        _state.update { it.copy(deletingChatId = id, recentLoading = false, historyError = null,
+            loading = if (it.chatId == id) false else it.loading) }
+        deleteJob = viewModelScope.launch {
+            var token: String? = null
+            try {
+                token = auth.accessToken(owner)
+                sessionApi.deleteChat(id, "Bearer $token")
+                currentCoroutineContext().ensureActive()
+                if (activeUserId == owner && deleteGeneration == requestGeneration) removeDeletedChat(id)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (error is HttpException && error.code() == 401 && token != null) auth.invalidateSession(owner, token)
+                if (activeUserId == owner && deleteGeneration == requestGeneration) {
+                    if (error is HttpException && error.code() == 404) removeDeletedChat(id)
+                    else _state.update { it.copy(historyError = "Chat delete confirm nahi hua. Saved chats refresh karke check karo.") }
+                }
+            } finally {
+                if (activeUserId == owner && deleteGeneration == requestGeneration)
+                    _state.update { it.copy(deletingChatId = null) }
+            }
+        }
+    }
+
+    private fun removeDeletedChat(id: Int) {
+        drafts.remove(id)
+        if (_state.value.chatId == id) {
+            chatJob?.cancel()
+            resetCurrentChat()
+        }
+        _state.update { it.copy(recentChats = it.recentChats.filterNot { chat -> chat.id == id }) }
+        refreshRecent()
     }
 
     fun loadOlderMessages() {
@@ -273,7 +323,7 @@ class ChatViewModel(
             _state.update { it.copy(selectionError = "Pehle General ya garage ki bike select kar.") }
             return
         }
-        if (!sessionReady || current.loading || text.isBlank()) return
+        if (!sessionReady || current.loading || (current.chatId != null && current.deletingChatId == current.chatId) || text.isBlank()) return
         val request = ChatRequest(current.chatId ?: 0, text, base64Image, current.selectedBike?.id, current.isGeneral)
         val requestGeneration = ++generation
         _state.update { it.copy(selectionError = null, selectionLocked = true, draft = ChatDraft(), loading = true,

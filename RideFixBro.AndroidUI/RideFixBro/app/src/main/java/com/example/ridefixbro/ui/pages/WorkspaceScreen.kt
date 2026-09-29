@@ -12,6 +12,8 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.DirectionsBike
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -25,9 +27,11 @@ import com.example.ridefixbro.viewmodel.AuthUiState
 import com.example.ridefixbro.viewmodel.ChatViewModel
 import com.example.ridefixbro.viewmodel.GarageViewModel
 import com.example.ridefixbro.viewmodel.ChatUiState
+import com.example.ridefixbro.viewmodel.AdminBikeViewModel
+import com.example.ridefixbro.viewmodel.RecentChat
 import kotlinx.coroutines.launch
 
-private enum class WorkspacePage { Chat, AddBike, Garage, Profile }
+private enum class WorkspacePage { Chat, AddBike, Garage, Profile, Admin }
 
 @Composable
 fun WorkspaceScreen(
@@ -35,6 +39,7 @@ fun WorkspaceScreen(
     authState: AuthUiState,
     chatViewModel: ChatViewModel,
     garageViewModel: GarageViewModel,
+    adminBikeViewModel: AdminBikeViewModel,
     onRetryAuth: () -> Unit,
     onSignOut: () -> Unit
 ) {
@@ -43,9 +48,13 @@ fun WorkspaceScreen(
     var page by rememberSaveable { mutableStateOf(WorkspacePage.Chat) }
     val garage by garageViewModel.state.collectAsState()
     val chat by chatViewModel.state.collectAsState()
+    val admin by adminBikeViewModel.state.collectAsState()
+    var pendingDelete by remember { mutableStateOf<RecentChat?>(null) }
     val enabled = authState.sessionReady && !authState.loading
 
     LaunchedEffect(garage.bikes) { chatViewModel.updateGarage(garage.bikes) }
+    LaunchedEffect(admin.published) { if (admin.published != null) garageViewModel.refresh() }
+    LaunchedEffect(profile.role) { if (profile.role != "Admin" && page == WorkspacePage.Admin) page = WorkspacePage.Chat }
     fun navigate(next: WorkspacePage) {
         page = next
         scope.launch { drawer.close() }
@@ -65,11 +74,12 @@ fun WorkspaceScreen(
         drawerContent = {
             ModalDrawerSheet(Modifier.width(280.dp)) {
                 Sidebar(
-                    expanded = true, profile = profile, chat = chat,
+                    expanded = true, profile = profile, chat = chat, enabled = enabled,
                     onToggle = { scope.launch { drawer.close() } }, onNewChat = newChat, onOpenChat = openChat,
                     onAddBike = { navigate(WorkspacePage.AddBike) }, onGarage = { navigate(WorkspacePage.Garage) },
                     onProfile = { navigate(WorkspacePage.Profile) }, onSignOut = onSignOut,
-                    onRefreshChats = { chatViewModel.refreshRecent() }, onMoreChats = { chatViewModel.refreshRecent(true) }
+                    onRefreshChats = { chatViewModel.refreshRecent() }, onMoreChats = { chatViewModel.refreshRecent(true) },
+                    onDeleteChat = { pendingDelete = it }, onAdmin = { navigate(WorkspacePage.Admin) }
                 )
             }
         }
@@ -77,11 +87,12 @@ fun WorkspaceScreen(
         Row(Modifier.fillMaxSize().systemBarsPadding()) {
             Surface(Modifier.width(64.dp).fillMaxHeight(), color = MaterialTheme.colorScheme.surfaceVariant) {
                 Sidebar(
-                    expanded = false, profile = profile, chat = chat,
+                    expanded = false, profile = profile, chat = chat, enabled = enabled,
                     onToggle = { scope.launch { drawer.open() } }, onNewChat = newChat, onOpenChat = openChat,
                     onAddBike = { navigate(WorkspacePage.AddBike) }, onGarage = { navigate(WorkspacePage.Garage) },
                     onProfile = { navigate(WorkspacePage.Profile) }, onSignOut = onSignOut,
-                    onRefreshChats = { chatViewModel.refreshRecent() }, onMoreChats = { chatViewModel.refreshRecent(true) }
+                    onRefreshChats = { chatViewModel.refreshRecent() }, onMoreChats = { chatViewModel.refreshRecent(true) },
+                    onDeleteChat = { pendingDelete = it }, onAdmin = { navigate(WorkspacePage.Admin) }
                 )
             }
             Column(Modifier.weight(1f).fillMaxHeight()) {
@@ -91,10 +102,26 @@ fun WorkspaceScreen(
                     TextButton(onClick = onRetryAuth) { Text("Retry connection") }
                 }
                 when (page) {
-                    WorkspacePage.Chat -> ChatScreen(chatViewModel, profile.supabaseUserId, enabled, garage.bikes)
+                    WorkspacePage.Chat -> ChatScreen(chatViewModel, profile.supabaseUserId,
+                        enabled && (chat.chatId == null || chat.deletingChatId != chat.chatId), garage.bikes)
                     WorkspacePage.AddBike -> AddBikeScreen(garage, enabled, garageViewModel::addBike, garageViewModel::refresh)
                     WorkspacePage.Garage -> GarageScreen(garage, enabled, garageViewModel::deleteBike, garageViewModel::refresh)
                     WorkspacePage.Profile -> ProfileScreen(profile)
+                    WorkspacePage.Admin -> AdminBikeScreen(profile, adminBikeViewModel, enabled)
+                }
+                pendingDelete?.let { selected ->
+                    AlertDialog(
+                        onDismissRequest = { pendingDelete = null },
+                        title = { Text("Permanently delete chat?") },
+                        text = { Text("'${selected.title}' and all its saved messages will be deleted. This cannot be undone.") },
+                        confirmButton = {
+                            TextButton(enabled = enabled && chat.deletingChatId == null, onClick = {
+                                pendingDelete = null
+                                chatViewModel.deleteChat(selected.id)
+                            }) { Text("Delete permanently") }
+                        },
+                        dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } }
+                    )
                 }
             }
         }
@@ -102,11 +129,12 @@ fun WorkspaceScreen(
 }
 
 @Composable
-private fun Sidebar(
-    expanded: Boolean, profile: UserProfileResponse, chat: ChatUiState,
+internal fun Sidebar(
+    expanded: Boolean, profile: UserProfileResponse, chat: ChatUiState, enabled: Boolean,
     onToggle: () -> Unit, onNewChat: () -> Unit, onOpenChat: (Int) -> Unit,
     onAddBike: () -> Unit, onGarage: () -> Unit, onProfile: () -> Unit, onSignOut: () -> Unit,
-    onRefreshChats: () -> Unit, onMoreChats: () -> Unit
+    onRefreshChats: () -> Unit, onMoreChats: () -> Unit,
+    onDeleteChat: (RecentChat) -> Unit, onAdmin: () -> Unit
 ) {
     Column(Modifier.fillMaxSize().padding(8.dp)) {
         IconButton(onClick = onToggle) {
@@ -117,7 +145,7 @@ private fun Sidebar(
         if (expanded) {
             Text("Recent chats", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(8.dp))
             Text("Saved chats", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 8.dp))
-            TextButton(onClick = onRefreshChats, enabled = !chat.recentLoading) { Text("Refresh chats") }
+            TextButton(onClick = onRefreshChats, enabled = enabled && !chat.recentLoading) { Text("Refresh chats") }
             chat.historyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (chat.recentLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
             LazyColumn(Modifier.weight(1f)) {
@@ -125,6 +153,11 @@ private fun Sidebar(
                     NavigationDrawerItem(
                         selected = recent.id == chat.chatId,
                         onClick = { onOpenChat(recent.id) },
+                        badge = {
+                            IconButton(onClick = { onDeleteChat(recent) }, enabled = enabled && chat.deletingChatId == null) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete chat ${recent.title}")
+                            }
+                        },
                         label = {
                             Column {
                                 Text(recent.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -144,6 +177,7 @@ private fun Sidebar(
         }
         SidebarItem("Your garage", Icons.Default.DirectionsBike, expanded, onGarage)
         SidebarItem("Add new bike", Icons.Default.Add, expanded, onAddBike)
+        if (profile.role == "Admin") SidebarItem("Publish bike/manual", Icons.Default.UploadFile, expanded, onAdmin)
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
         SidebarItem("Profile", Icons.Default.AccountCircle, expanded, onProfile)
         if (expanded) {

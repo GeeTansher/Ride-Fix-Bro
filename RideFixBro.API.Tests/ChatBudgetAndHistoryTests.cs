@@ -21,8 +21,8 @@ namespace RideFixBro.API.Tests
 			});
 			var manager = CreateManager(agent, new InMemoryChatStore());
 
-			Assert.Equal("First", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("First", null)));
-			Assert.Equal("Second", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Second", null)));
+			Assert.Equal(new ChatReply(1, "First"), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("First", null)));
+			Assert.Equal(new ChatReply(1, "Second"), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Second", null)));
 			Assert.Equal(12, executions);
 			Assert.All(handler.Requests, AssertValidSequence);
 		}
@@ -40,7 +40,7 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 
 			await Assert.ThrowsAsync<ChatLimitExceededException>(
-				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
+				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null)));
 			Assert.Equal(0, executions);
 			Assert.Single(handler.Requests);
 			Assert.Empty(store.GetHistory(1));
@@ -58,9 +58,9 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(agent, store);
-			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Saved question", null));
+			await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Saved question", null));
 
-			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Too much", null)));
+			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Too much", null)));
 			Assert.Equal(4, executions);
 			Assert.Equal(2, store.GetHistory(1).Count);
 			Assert.StartsWith("Saved question", Assert.IsAssignableFrom<TextMessage>(store.GetHistory(1)[0]).Content);
@@ -71,7 +71,7 @@ namespace RideFixBro.API.Tests
 		{
 			using var handler = new RecordingHandler(Batch("too-many", 3));
 			var manager = CreateManager(CreateAgent(handler), new InMemoryChatStore(), maxToolCalls: 2);
-			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
+			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null)));
 		}
 
 		[Fact]
@@ -86,7 +86,7 @@ namespace RideFixBro.API.Tests
 
 			for (var i = 1; i <= 12; i++)
 			{
-				await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput($"Question {i}", i == 1 ? image : null));
+				await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput($"Question {i}", i == 1 ? image : null));
 			}
 
 			var history = store.GetHistory(1);
@@ -110,13 +110,13 @@ namespace RideFixBro.API.Tests
 			var manager = CreateManager(CreateAgent(handler), store);
 			for (var i = 1; i <= 10; i++)
 			{
-				await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput($"Question {i}", null));
+				await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput($"Question {i}", null));
 			}
 
 			var saved = store.GetHistory(1);
-			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Failed", null)));
+			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Failed", null)));
 			Assert.Equal(saved, store.GetHistory(1));
-			Assert.Equal("Recovered", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Retry", null)));
+			Assert.Equal(new ChatReply(1, "Recovered"), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Retry", null)));
 			Assert.StartsWith("Question 1", Assert.IsAssignableFrom<TextMessage>(store.GetHistory(1)[0]).Content);
 			Assert.Equal(22, store.GetHistory(1).Count);
 			Assert.StartsWith("Question 2", handler.Requests[^1].GetProperty("messages")[1].GetProperty("content").GetString());
@@ -128,8 +128,8 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(TextReply("First"), TextReply("Second"));
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store, maxHistoryTurns: 1);
-			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("First", null));
-			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Second", null));
+			await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("First", null));
+			await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Second", null));
 			Assert.Equal(4, store.GetHistory(1).Count);
 			Assert.Equal(2, handler.Requests[1].GetProperty("messages").GetArrayLength());
 		}

@@ -41,8 +41,8 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(agent, store);
 
-			Assert.Equal("Bhai, here is the answer.", await manager.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("First question", null)));
-			Assert.Equal("Bhai, follow-up answer.", await manager.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Next question", null)));
+			Assert.Equal(new ChatReply(1, "Bhai, here is the answer."), await manager.AskMechanicBro(new ChatContext(1, ManualBike, 1), new ChatInput("First question", null)));
+			Assert.Equal(new ChatReply(1, "Bhai, follow-up answer."), await manager.AskMechanicBro(new ChatContext(1, ManualBike, 1), new ChatInput("Next question", null)));
 
 			Assert.Equal(4, invoked.Count);
 			Assert.Equal(7, store.GetHistory(1).Count);
@@ -91,7 +91,7 @@ namespace RideFixBro.API.Tests
 			var agent = MechanicBroAgent.Create(CreateClient(modelHandler), tavily, vector);
 			var manager = CreateManager(agent, new InMemoryChatStore());
 
-			Assert.Equal("Found the price.", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
+			Assert.Equal(new ChatReply(1, "Found the price."), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null)));
 			Assert.Equal("helmet price", Assert.Single(searchHandler.Requests).GetProperty("query").GetString());
 			var tools = modelHandler.Requests[0].GetProperty("tools").EnumerateArray()
 				.Select(tool => tool.GetProperty("function").GetProperty("name").GetString()).ToArray();
@@ -123,7 +123,7 @@ namespace RideFixBro.API.Tests
 				return Task.FromResult("Applicable manual passage");
 			});
 			await CreateManager(agent, new InMemoryChatStore())
-				.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Manual guidance and real-world feedback?", null));
+				.AskMechanicBro(new ChatContext(1, ManualBike, 1), new ChatInput("Manual guidance and real-world feedback?", null));
 
 			Assert.Equal(new[] { "manual", "web" }, calls);
 			var instructions = handler.Requests[0].GetProperty("messages")[0].GetProperty("content").GetString()!;
@@ -150,7 +150,7 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 
 			var error = await Assert.ThrowsAsync<ArgumentException>(() => CreateManager(agent, store)
-				.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Search", null)));
+				.AskMechanicBro(new ChatContext(1, ManualBike, 1), new ChatInput("Search", null)));
 			Assert.Equal("userQuery", error.ParamName);
 			Assert.Empty(store.GetHistory(1));
 			var request = Assert.Single(handler.Requests);
@@ -186,7 +186,7 @@ namespace RideFixBro.API.Tests
 				});
 			using var cancellation = new CancellationTokenSource();
 			await CreateManager(agent, new InMemoryChatStore())
-				.AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Search", null), cancellation.Token);
+				.AskMechanicBro(new ChatContext(1, ManualBike, 1), new ChatInput("Search", null), cancellation.Token);
 			Assert.Equal(ManualBike.ManualKey, executedKey);
 			Assert.Equal(cancellation.Token, executedToken);
 			Assert.All(handler.Requests, AssertValidSequence);
@@ -204,7 +204,7 @@ namespace RideFixBro.API.Tests
 			var agent = CreateAgent(handler, _ => Task.FromResult(result!));
 
 			var error = await Assert.ThrowsAsync<InvalidOperationException>(
-				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
+				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null)));
 			Assert.Contains("empty result", error.Message);
 			Assert.Empty(store.GetHistory(1));
 			Assert.Single(handler.Requests);
@@ -224,9 +224,9 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store);
 
-			await Assert.ThrowsAsync<InvalidOperationException>(() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Failed turn", null)));
+			await Assert.ThrowsAsync<InvalidOperationException>(() => manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Failed turn", null)));
 			Assert.Empty(store.GetHistory(1));
-			Assert.Equal("Recovered", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("New turn", null)));
+			Assert.Equal(new ChatReply(1, "Recovered"), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("New turn", null)));
 			Assert.Equal(new[] { "system", "user" }, Roles(handler.Requests[1]));
 		}
 
@@ -241,13 +241,13 @@ namespace RideFixBro.API.Tests
 			handler.StatusCodes[2] = HttpStatusCode.BadRequest;
 			var store = new InMemoryChatStore();
 			var manager = CreateManager(CreateAgent(handler), store);
-			await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Saved question", null));
+			await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Saved question", null));
 
 			var error = await Assert.ThrowsAsync<ClientResultException>(
-				() => manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Failed question", null)));
+				() => manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Failed question", null)));
 			Assert.Equal(400, error.Status);
 			Assert.Equal(2, store.GetHistory(1).Count);
-			Assert.Equal("Recovered", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Retry", null)));
+			Assert.Equal(new ChatReply(1, "Recovered"), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Retry", null)));
 			Assert.Equal(new[] { "system", "user", "assistant", "user" }, Roles(handler.Requests[3]));
 			Assert.DoesNotContain("Failed question", handler.Requests[3].GetRawText());
 		}
@@ -267,7 +267,7 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			var error = await Assert.ThrowsAsync<ChatLimitExceededException>(
-				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
+				() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null)));
 
 			Assert.Contains("5 rounds", error.Message);
 			Assert.Equal(5, executions);
@@ -284,7 +284,7 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(responses);
 			var store = new InMemoryChatStore();
 
-			Assert.Equal("Done", await CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, ManualBike), new ChatInput("Search", null)));
+			Assert.Equal(new ChatReply(1, "Done"), await CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, ManualBike, 1), new ChatInput("Search", null)));
 			Assert.Equal(7, store.GetHistory(1).Count);
 			Assert.All(handler.Requests, request => AssertValidSequence(request));
 		}
@@ -298,8 +298,8 @@ namespace RideFixBro.API.Tests
 				TextReply("Second"));
 			var manager = CreateManager(CreateAgent(handler), new InMemoryChatStore(), maxToolRounds: 1);
 
-			Assert.Equal("First", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("First", null)));
-			Assert.Equal("Second", await manager.AskMechanicBro(new ChatContext(1, null), new ChatInput("Second", null)));
+			Assert.Equal(new ChatReply(1, "First"), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("First", null)));
+			Assert.Equal(new ChatReply(1, "Second"), await manager.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Second", null)));
 			Assert.Equal(4, handler.Requests.Count);
 		}
 
@@ -311,19 +311,19 @@ namespace RideFixBro.API.Tests
 			var image = $"data:image/png;base64,{Convert.ToBase64String(ImageFixtures.Png())}";
 			var store = new InMemoryChatStore();
 
-			Assert.Equal("Hi bro", await CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Hi", image)));
+			Assert.Equal(new ChatReply(1, "Hi bro"), await CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Hi", image)));
 			var content = handler.Requests[0].GetProperty("messages")[1].GetProperty("content");
 			Assert.Equal(image, content[1].GetProperty("image_url").GetProperty("url").GetString());
 			Assert.Equal(2, store.GetHistory(1).Count);
 		}
 
 		[Fact]
-		public async Task NonPersistedChatIdIsRejectedBeforeCallingTheProvider()
+		public async Task InvalidChatContextIsRejectedBeforeCallingTheProvider()
 		{
 			using var handler = new RecordingHandler();
 			await Assert.ThrowsAsync<ChatInputException>(
 				() => CreateManager(CreateAgent(handler), new InMemoryChatStore())
-					.AskMechanicBro(new ChatContext(0, null), new ChatInput("Hi", null)));
+					.AskMechanicBro(new ChatContext(-1, null, 1), new ChatInput("Hi", null)));
 			Assert.Empty(handler.Requests);
 		}
 
@@ -342,7 +342,7 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 
-			await Assert.ThrowsAnyAsync<JsonException>(() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
+			await Assert.ThrowsAnyAsync<JsonException>(() => CreateManager(agent, store).AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null)));
 			Assert.Equal(0, executions);
 			Assert.Empty(store.GetHistory(1));
 		}
@@ -358,7 +358,7 @@ namespace RideFixBro.API.Tests
 			var store = new InMemoryChatStore();
 
 			await Assert.ThrowsAsync<InvalidOperationException>(() =>
-				CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null)));
+				CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null)));
 			Assert.Single(handler.Requests);
 			Assert.Empty(store.GetHistory(1));
 		}
@@ -371,7 +371,7 @@ namespace RideFixBro.API.Tests
 			using var handler = new RecordingHandler(TextReply(text));
 			var store = new InMemoryChatStore();
 			await Assert.ThrowsAsync<InvalidOperationException>(() =>
-				CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, null), new ChatInput("Hi", null)));
+				CreateManager(CreateAgent(handler), store).AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Hi", null)));
 			Assert.Empty(store.GetHistory(1));
 		}
 

@@ -42,14 +42,14 @@ namespace RideFixBro.API.Controllers
 				// Validate/decode once, before new chat creation; reuse the owned context for the entire turn.
 				var input = inputValidator.Validate(request.Message, request.ImageData);
 				var chat = request.SessionId == 0
-					? await chats.CreateAsync(appUserId, request.UserBikeId, request.IsGeneral, cancellationToken)
+					? await chats.PrepareNewAsync(appUserId, request.UserBikeId, request.IsGeneral, cancellationToken)
 					: await chats.GetContextAsync(appUserId, request.SessionId, cancellationToken);
-				assignedSessionId = chat.Id;
+				assignedSessionId = chat.Id == 0 ? null : chat.Id;
 				if ((request.UserBikeId.HasValue && request.UserBikeId != chat.Bike?.UserBikeId) ||
 					(request.IsGeneral && !chat.IsGeneral))
 					throw new ChatInputException("Chat selection locked hai. New Chat kholo.", 409);
 				var response = await _aiManager.AskMechanicBro(chat, input, cancellationToken);
-				return Ok(new { SessionId = chat.Id, Reply = response });
+				return Ok(response);
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{

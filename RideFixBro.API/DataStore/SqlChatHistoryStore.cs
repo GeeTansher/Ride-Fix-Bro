@@ -3,6 +3,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using RideFixBro.API.DataStore.Interfaces;
 using RideFixBro.API.Services;
+using RideFixBro.API.Models;
 using RideFixBro.Data.Entities;
 
 namespace RideFixBro.API.DataStore;
@@ -25,24 +26,30 @@ public sealed class SqlChatHistoryStore(RideFixBroDbContext database) : IChatHis
         return new(saved.Select(ChatMessageCodec.Decode).ToArray(), last.TurnNumber, last.SequenceNumber);
     }
 
-    public async Task AppendTurnAsync(int chatId, ChatHistorySnapshot previous, IReadOnlyList<IMessage> turn, CancellationToken token)
+    public async Task<int> AppendTurnAsync(ChatContext chat, ChatHistorySnapshot previous, IReadOnlyList<IMessage> turn, CancellationToken token)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chatId);
+        ArgumentOutOfRangeException.ThrowIfNegative(chat.Id);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chat.UserId);
         if (turn.Count == 0) throw new ArgumentException("A complete non-empty turn is required.", nameof(turn));
         token.ThrowIfCancellationRequested();
         var sequence = previous.LastSequenceNumber;
+        var newChat = chat.Id == 0
+            ? new ChatSession { UserId = chat.UserId, UserBikeId = chat.Bike?.UserBikeId, IsActive = true, CreatedAt = DateTime.UtcNow }
+            : null;
         var additions = turn.Select(ChatMessageCodec.Encode).ToList();
         foreach (var row in additions)
         {
-            row.ChatSessionId = chatId;
+            if (newChat is null) row.ChatSessionId = chat.Id;
+            else row.ChatSession = newChat;
             row.TurnNumber = previous.LastTurnNumber + 1;
             row.SequenceNumber = ++sequence;
         }
         database.Messages.AddRange(additions);
         try
         {
-            // One SaveChanges commits the whole turn. The unique sequence index rejects stale concurrent writers.
+            // One transaction saves a new chat AND its first complete turn. Failure leaves no empty chat.
             await database.SaveChangesAsync(token);
+            return newChat?.Id ?? chat.Id;
         }
         catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 2601 or 2627 })
         {

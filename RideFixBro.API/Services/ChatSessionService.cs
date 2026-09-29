@@ -7,7 +7,7 @@ namespace RideFixBro.API.Services;
 
 public sealed class ChatSessionService(RideFixBroDbContext database)
 {
-    public async Task<ChatContext> CreateAsync(int userId, int? userBikeId, bool isGeneral, CancellationToken token)
+    public async Task<ChatContext> PrepareNewAsync(int userId, int? userBikeId, bool isGeneral, CancellationToken token)
     {
         if (isGeneral == userBikeId.HasValue)
             throw new ChatInputException("Select either General or one garage bike.");
@@ -16,17 +16,14 @@ public sealed class ChatSessionService(RideFixBroDbContext database)
             bike = await database.UserBikes.AsNoTracking().Include(row => row.Bike)
                 .SingleOrDefaultAsync(row => row.Id == userBikeId && row.UserId == userId && !row.IsDeleted, token)
                 ?? throw new ChatInputException("Selected bike is not in your active garage.", 404);
-        var row = new ChatSession { UserId = userId, UserBikeId = userBikeId, IsActive = true, CreatedAt = DateTime.UtcNow };
-        database.ChatSessions.Add(row);
-        await database.SaveChangesAsync(token);
-        // Insert ka generated Id aur already-loaded bike reuse karo; chat ko dobara query nahi karna.
-        return new ChatContext(row.Id, ToBikeContext(bike));
+        // No chat row yet. SqlChatHistoryStore saves it only with the first complete successful turn.
+        return new ChatContext(0, ToBikeContext(bike), userId);
     }
 
     public async Task<ChatContext> GetContextAsync(int userId, int id, CancellationToken token)
     {
         var chat = await GetAsync(userId, id, token);
-        return new ChatContext(chat.Id, ToBikeContext(chat.UserBike));
+        return new ChatContext(chat.Id, ToBikeContext(chat.UserBike), chat.UserId);
     }
 
     private async Task<ChatSession> GetAsync(int userId, int id, CancellationToken token) =>
@@ -34,8 +31,10 @@ public sealed class ChatSessionService(RideFixBroDbContext database)
             .SingleOrDefaultAsync(chat => chat.Id == id && chat.UserId == userId && chat.IsActive, token)
         ?? throw new ChatInputException("Chat not found.", 404);
 
-    public async Task<List<ChatSummary>> ListAsync(int userId, int? beforeId, CancellationToken token)
+    public async Task<List<ChatSummary>> ListAsync(int userId, int? beforeId, DateTime? beforeUpdatedAt, CancellationToken token)
     {
+        if (beforeId.HasValue != beforeUpdatedAt.HasValue || beforeId is <= 0)
+            throw new ChatInputException("Provide both beforeId and beforeUpdatedAt from the last listed chat.");
         var query = database.ChatSessions.AsNoTracking().Include(chat => chat.UserBike).ThenInclude(bike => bike!.Bike)
             .Where(chat => chat.UserId == userId && chat.IsActive)
             .Select(chat => new { Chat = chat,
@@ -44,10 +43,9 @@ public sealed class ChatSessionService(RideFixBroDbContext database)
                 Updated = chat.Messages.Select(message => (DateTime?)message.Timestamp).Max() ?? chat.CreatedAt });
         if (beforeId.HasValue)
         {
-            var cursor = await query.SingleOrDefaultAsync(row => row.Chat.Id == beforeId, token)
-                ?? throw new ChatInputException("Chat page cursor not found.", 404);
-            query = query.Where(row => row.Updated < cursor.Updated ||
-                (row.Updated == cursor.Updated && row.Chat.Id < cursor.Chat.Id));
+            // Cursor values come from the previous page, not from a row that can change or be deleted.
+            query = query.Where(row => row.Updated < beforeUpdatedAt ||
+                (row.Updated == beforeUpdatedAt && row.Chat.Id < beforeId));
         }
         var rows = await query.OrderByDescending(row => row.Updated).ThenByDescending(row => row.Chat.Id).Take(50).ToListAsync(token);
         return rows.Select(row => Summary(row.Chat, row.Title ?? "New chat", row.Updated)).ToList();
@@ -64,10 +62,21 @@ public sealed class ChatSessionService(RideFixBroDbContext database)
         var page = rows.Take(100).Reverse().ToList();
         var messages = page.Select(row => new SavedChatMessage(row.SequenceNumber, row.Content ?? "",
             row.Role == "User", ChatMessageCodec.PhotoNotStored(row))).ToList();
-        var firstText = await database.Messages.Where(row => row.ChatSessionId == id && row.Role == "User")
-            .OrderBy(row => row.SequenceNumber).Select(row => row.Content).FirstOrDefaultAsync(token);
-        return new(Summary(chat, firstText ?? "New chat", rows.FirstOrDefault()?.Timestamp ?? chat.CreatedAt),
+        var metadata = await database.ChatSessions.Where(row => row.Id == id).Select(row => new
+        {
+            Title = row.Messages.Where(message => message.Role == "User").OrderBy(message => message.SequenceNumber)
+                .Select(message => message.Content).FirstOrDefault(),
+            Updated = row.Messages.Select(message => (DateTime?)message.Timestamp).Max() ?? row.CreatedAt
+        }).SingleAsync(token);
+        return new(Summary(chat, metadata.Title ?? "New chat", metadata.Updated),
             messages, more ? page[0].SequenceNumber : null);
+    }
+
+    public async Task DeleteAsync(int userId, int id, CancellationToken token)
+    {
+        // The existing database FK cascades to Messages; garage bikes and other chats are untouched.
+        if (await database.ChatSessions.Where(chat => chat.Id == id && chat.UserId == userId).ExecuteDeleteAsync(token) == 0)
+            throw new ChatInputException("Chat not found.", 404);
     }
 
     private static BikeContext? ToBikeContext(UserBike? bike) => bike is null ? null :

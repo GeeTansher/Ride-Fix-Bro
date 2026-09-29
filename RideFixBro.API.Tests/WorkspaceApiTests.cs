@@ -138,7 +138,7 @@ namespace RideFixBro.API.Tests
 			});
 			var manager = ToolFlowTests.CreateManager(agent, new InMemoryChatStore());
 			await Assert.ThrowsAsync<ChatLimitExceededException>(() => manager.AskMechanicBro(
-				new ChatContext(1, new BikeContext(2, "Another make", "Another model", 2025, null)), new ChatInput("Specs", null)));
+				new ChatContext(1, new BikeContext(2, "Another make", "Another model", 2025, null), 1), new ChatInput("Specs", null)));
 			Assert.Equal(0, calls);
 			var tools = handler.Requests[0].GetProperty("tools").EnumerateArray()
 				.Select(tool => tool.GetProperty("function").GetProperty("name").GetString());
@@ -237,8 +237,8 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			var reply = await ToolFlowTests.CreateManager(agent, store).AskMechanicBro(
-				new ChatContext(1, null), new ChatInput("General question", null));
-			Assert.Equal("General answer", reply);
+				new ChatContext(1, null, 1), new ChatInput("General question", null));
+			Assert.Equal("General answer", reply.Reply);
 			Assert.Equal(1, calls);
 			foreach (var request in handler.Requests)
 			{
@@ -262,7 +262,7 @@ namespace RideFixBro.API.Tests
 			});
 			var store = new InMemoryChatStore();
 			await Assert.ThrowsAsync<ChatLimitExceededException>(() => ToolFlowTests.CreateManager(agent, store)
-				.AskMechanicBro(new ChatContext(1, null), new ChatInput("Hi", null)));
+				.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Hi", null)));
 			Assert.Equal(0, calls);
 			Assert.Empty(store.GetHistory(1));
 		}

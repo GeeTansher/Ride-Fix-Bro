@@ -74,7 +74,7 @@ class SessionLifecycleTest {
             UserProfileResponse(1, user.id, "${user.id}@example.test", "User")
         }
         coEvery { api.askMechanicBro(any(), any()) } answers { savedReply(firstArg(), "Answer") }
-        coEvery { api.chats(any(), any()) } answers { savedChats.values.toList().reversed() }
+        coEvery { api.chats(any(), any(), any()) } answers { savedChats.values.toList().reversed() }
     }
 
     private fun savedReply(request: ChatRequest, text: String): ChatResponse {
@@ -500,22 +500,19 @@ class SessionLifecycleTest {
     }
 
     @Test
-    fun failedFirstReplyRetainsServerIdForRetry() = runTest(dispatcher) {
+    fun failedFirstReplyHasNoSavedIdAndDoesNotAutomaticallyRetry() = runTest(dispatcher) {
         coEvery { api.askMechanicBro(any(), any()) } throws HttpException(Response.error<ChatResponse>(500,
-            """{"error":"Provider failed","sessionId":41}""".toResponseBody("application/json".toMediaType())))
+            """{"error":"Provider failed","sessionId":null}""".toResponseBody("application/json".toMediaType())))
         val chat = keep(ChatViewModel(auth, api, api))
         statuses.value = authenticated("user-a")
         runCurrent()
         chat.selectGeneral()
         chat.sendMessage("First")
         runCurrent()
-        assertEquals(41, chat.state.value.chatId)
+        assertNull(chat.state.value.chatId)
         assertTrue(chat.state.value.selectionLocked)
-        coEvery { api.askMechanicBro(any(), any()) } returns ChatResponse("Recovered", 41)
-        chat.sendMessage("Retry")
-        runCurrent()
-        coVerify { api.askMechanicBro(match { it.sessionId == 41 && it.message == "Retry" }, any()) }
-        assertEquals("Recovered", chat.state.value.messages.last().text)
+        assertTrue(chat.state.value.recentChats.isEmpty())
+        coVerify(exactly = 1) { api.askMechanicBro(match { it.sessionId == 0 && it.message == "First" }, any()) }
     }
 
     @Test
@@ -652,7 +649,7 @@ class SessionLifecycleTest {
     @Test
     fun freshViewModelReopensDatabaseChatAndContinuesWithoutCreatingAnotherChat() = runTest(dispatcher) {
         val summary = ChatSummary(77, "Saved before restart", null, true, "")
-        coEvery { api.chats(any(), any()) } returns listOf(summary)
+        coEvery { api.chats(any(), any(), any()) } returns listOf(summary)
         coEvery { api.chat(77, any(), null) } returns ChatDetail(summary,
             listOf(SavedChatMessage(3, "Saved photo question", true, true), SavedChatMessage(4, "Saved answer", false, false)), 3)
         coEvery { api.chat(77, any(), 3) } returns ChatDetail(summary,
@@ -688,7 +685,7 @@ class SessionLifecycleTest {
         runCurrent()
         chat.openChat(77)
         runCurrent()
-        coEvery { api.chats(any(), any()) } throws IOException("Database unavailable")
+        coEvery { api.chats(any(), any(), any()) } throws IOException("Database unavailable")
         statuses.value = authenticated("user-b")
         runCurrent()
         pending.complete(ChatDetail(ChatSummary(77, "Private", null, true, ""),
@@ -697,9 +694,84 @@ class SessionLifecycleTest {
         assertTrue(chat.state.value.messages.isEmpty())
         assertFalse(chat.state.value.isGeneral)
         assertNotNull(chat.state.value.historyError)
-        coEvery { api.chats(any(), any()) } returns emptyList()
+        coEvery { api.chats(any(), any(), any()) } returns emptyList()
         chat.refreshRecent()
         runCurrent()
+        assertNull(chat.state.value.historyError)
+    }
+
+    @Test
+    fun recentPaginationSendsTheOriginalTimestampAndIdTogether() = runTest(dispatcher) {
+        val timestamp = "2026-09-29T10:00:00Z"
+        val page = (50 downTo 1).map { ChatSummary(it, "Chat $it", null, true, timestamp) }
+        coEvery { api.chats(any(), null, null) } returns page
+        coEvery { api.chats(any(), 1, timestamp) } returns emptyList()
+        val chat = keep(ChatViewModel(auth, api, api))
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        assertTrue(chat.state.value.moreChats)
+        chat.refreshRecent(true)
+        runCurrent()
+        coVerify(exactly = 1) { api.chats(any(), 1, timestamp) }
+        assertEquals(50, chat.state.value.recentChats.size)
+        assertFalse(chat.state.value.moreChats)
+    }
+
+    @Test
+    fun deletingTheCurrentChatClearsItsMessagesSelectionAndDraft() = runTest(dispatcher) {
+        val chat = keep(ChatViewModel(auth, api, api))
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        chat.selectGeneral()
+        chat.sendMessage("Saved")
+        runCurrent()
+        chat.updateDraftText("Unsaved draft")
+        coEvery { api.deleteChat(1, any()) } coAnswers { savedChats.remove(1); Unit }
+        chat.deleteChat(1)
+        runCurrent()
+        coVerify(exactly = 1) { api.deleteChat(1, any()) }
+        assertNull(chat.state.value.chatId)
+        assertTrue(chat.state.value.messages.isEmpty())
+        assertTrue(chat.state.value.recentChats.isEmpty())
+        assertEquals("", chat.state.value.draft.text)
+        assertFalse(chat.state.value.hasSelection)
+        assertNull(chat.state.value.deletingChatId)
+    }
+
+    @Test
+    fun failedDeleteKeepsTheChatAndShowsAnError() = runTest(dispatcher) {
+        val chat = keep(ChatViewModel(auth, api, api))
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        chat.selectGeneral()
+        chat.sendMessage("Saved")
+        runCurrent()
+        coEvery { api.deleteChat(1, any()) } throws IOException("Offline")
+        chat.deleteChat(1)
+        runCurrent()
+        assertEquals(1, chat.state.value.chatId)
+        assertEquals(2, chat.state.value.messages.size)
+        assertNotNull(chat.state.value.historyError)
+        assertNull(chat.state.value.deletingChatId)
+    }
+
+    @Test
+    fun lateDeleteCannotResetAnotherAccountAndBackgroundDoesNotStrandTheDeleteState() = runTest(dispatcher) {
+        val pending = CompletableDeferred<Unit>()
+        coEvery { api.deleteChat(1, any()) } coAnswers { withContext(NonCancellable) { pending.await() } }
+        val chat = keep(ChatViewModel(auth, api, api))
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        chat.deleteChat(1)
+        runCurrent()
+        statuses.value = SessionStatus.Initializing
+        runCurrent()
+        assertEquals(1, chat.state.value.deletingChatId)
+        statuses.value = authenticated("user-b")
+        runCurrent()
+        pending.complete(Unit)
+        runCurrent()
+        assertNull(chat.state.value.deletingChatId)
         assertNull(chat.state.value.historyError)
     }
 

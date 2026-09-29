@@ -16,7 +16,7 @@ namespace RideFixBro.API.Services;
 //   chunk    = PDF ke text ka tukda + uska embedding vector.
 //   manifest = ek ManualKey ka chhota record: kaunsi complete upload revision ab active hai.
 // ManualKey catalog ki stable identity hai; revision har upload ka naya version ID hai.
-public partial class VectorDbService
+public partial class VectorDbService : IManualPublisher
 {
     public const int MaxPdfBytes = 20 * 1024 * 1024;
     private const int Dimensions = 3072;
@@ -59,10 +59,36 @@ public partial class VectorDbService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userQuery);
         ArgumentException.ThrowIfNullOrWhiteSpace(manualKey);
-        var revision = await GetPublishedRevisionAsync(manualKey, cancellationToken);
+        return await ReadPublishedManualAsync(
+            () => GetPublishedRevisionAsync(manualKey, cancellationToken),
+            revision => SearchRevisionAsync(userQuery, manualKey, revision, cancellationToken),
+            cancellationToken);
+    }
+
+    // Keep this small consistency rule separate from network I/O: a publish can delete a reader's old revision.
+    internal static async Task<string> ReadPublishedManualAsync(
+        Func<Task<string?>> readRevision, Func<string, Task<string?>> readPassages, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var revision = await readRevision();
+        token.ThrowIfCancellationRequested();
         if (revision is null)
             return "No published manual exists for this catalog entry. Do not use another model/year's manual.";
-        return await SearchRevisionAsync(userQuery, manualKey, revision, cancellationToken);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            var passages = await readPassages(revision);
+            token.ThrowIfCancellationRequested();
+            if (passages is not null) return passages;
+            var current = await readRevision();
+            token.ThrowIfCancellationRequested();
+            if (current == revision)
+                return "No relevant manual passages were found. Do not present general advice as a verified manual specification.";
+            if (current is null)
+                throw new ChatInputException("Manual publication changed during search. Try again.", 503);
+            revision = current;
+        }
+        throw new ChatInputException("Manual is being updated. Try again shortly.", 503);
     }
 
     private async Task<string?> GetPublishedRevisionAsync(string manualKey, CancellationToken token)
@@ -77,7 +103,7 @@ public partial class VectorDbService
         return revision.StringValue;
     }
 
-    private async Task<string> SearchRevisionAsync(string query, string manualKey, string revision, CancellationToken token)
+    private async Task<string?> SearchRevisionAsync(string query, string manualKey, string revision, CancellationToken token)
     {
         var embedding = await _embeddingClient.GenerateEmbeddingAsync(query, cancellationToken: token);
         // Key + active revision + chunk: doosri bikes, incomplete uploads aur manifest results se excluded hain.
@@ -87,8 +113,7 @@ public partial class VectorDbService
             limit: 3, cancellationToken: token);
         var passages = results.Where(result => result.Payload.TryGetValue("text", out var value) &&
             !string.IsNullOrWhiteSpace(value.StringValue)).Select(result => result.Payload["text"].StringValue).ToArray();
-        return passages.Length > 0 ? string.Join("\n---\n", passages) :
-            "No relevant manual passages were found. Do not present general advice as a verified manual specification.";
+        return passages.Length > 0 ? string.Join("\n---\n", passages) : null;
     }
 
     public async Task<ManualUploadResult> ReplaceManualAsync(byte[] pdf, string manualKey, int skipPages, CancellationToken token)

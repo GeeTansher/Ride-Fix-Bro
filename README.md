@@ -61,7 +61,9 @@ produce a final answer, but no additional tools can execute.
 Model requests and embedding calls are separate from this tool-execution count;
 these limits are not a hard token or billing cap.
 
-SQL retains complete saved turns; only the model's context is limited to the
+SQL retains complete saved turns; a new chat and its first turn are inserted
+together only after the AI answer is ready. Failed generation or a rolled-back
+save does not leave an empty chat. Only the model's context is limited to the
 configured window of recent turns. Tool calls preserve their original Gemini
 metadata. A new turn is appended atomically after its final answer, so failed
 turns do not alter previously saved history. The Android client can page through

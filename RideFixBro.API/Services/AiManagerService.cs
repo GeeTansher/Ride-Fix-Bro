@@ -15,12 +15,13 @@ namespace RideFixBro.API.Services
 		private readonly ILogger<AiManagerService> _logger = logger;
 		private readonly ChatLimitsOptions _limits = limits;
 
-        public async Task<string> AskMechanicBro(ChatContext chat, ChatInput input, CancellationToken cancellationToken = default)
+        public async Task<ChatReply> AskMechanicBro(ChatContext chat, ChatInput input, CancellationToken cancellationToken = default)
 		{
 			try
 			{
-				if (chat.Id <= 0) throw new ChatInputException("A persisted chat ID is required.");
-				var previous = await _chatHistoryStore.LoadRecentAsync(chat.Id, _limits.MaxHistoryTurns - 1, cancellationToken);
+				if (chat.Id < 0 || chat.UserId <= 0) throw new ChatInputException("A valid owned chat context is required.");
+				var previous = chat.Id == 0 ? new ChatHistorySnapshot([], 0, 0) :
+					await _chatHistoryStore.LoadRecentAsync(chat.Id, _limits.MaxHistoryTurns - 1, cancellationToken);
 				var history = previous.Messages.ToList();
 				var turn = new List<IMessage> { CreateUserMessage(chat, input) };
 				history.AddRange(turn);
@@ -42,8 +43,8 @@ namespace RideFixBro.API.Services
 					{
 						turn.Add(reply);
 						// Save only this complete turn; old SQL history is never trimmed or rewritten.
-						await _chatHistoryStore.AppendTurnAsync(chat.Id, previous, turn, cancellationToken);
-						return text.Content;
+						var savedId = await _chatHistoryStore.AppendTurnAsync(chat, previous, turn, cancellationToken);
+						return new ChatReply(savedId, text.Content);
 					}
 
 					if (round >= _limits.MaxToolRounds)

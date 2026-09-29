@@ -11,10 +11,13 @@ namespace RideFixBro.API.Agents
 	{
 		public static IAgent Create(ChatClient chatClient, TavilySearchService tavilyService, VectorDbService vectorDbService)
 		{
+			// Generated contract includes server parameters too; model may supply only the search question.
+			var manualContract = vectorDbService.SearchManualAsyncFunctionContract;
+			manualContract.Parameters = [manualContract.Parameters!.Single(parameter => parameter.Name == "userQuery")];
 			// Contract = model ko tool ka description. Map = tool call aane par actual C# execution.
 			// Generated wrappers nahi chalate: neeche ke delegates trusted key/token actual methods ko dete hain.
 			return CreateCore(chatClient,
-				[tavilyService.SearchInternetAsyncFunctionContract, vectorDbService.SearchManualAsyncFunctionContract],
+				[tavilyService.SearchInternetAsyncFunctionContract, manualContract],
 				new Dictionary<string, Func<string, string?, CancellationToken, Task<string>>>
 				{
 					[nameof(TavilySearchService.SearchInternetAsync)] = (args, _, token) =>

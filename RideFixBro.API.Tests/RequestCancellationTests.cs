@@ -110,7 +110,7 @@ namespace RideFixBro.API.Tests
 			using var cancel = new CancellationTokenSource();
 			var store = new InMemoryChatStore();
 			var request = ToolFlowTests.CreateManager(agent, store)
-				.AskMechanicBro(new ChatContext(1, null), new ChatInput("Search", null), cancel.Token);
+				.AskMechanicBro(new ChatContext(1, null, 1), new ChatInput("Search", null), cancel.Token);
 			await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
 			cancel.Cancel();
 			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request.WaitAsync(TimeSpan.FromSeconds(5)));

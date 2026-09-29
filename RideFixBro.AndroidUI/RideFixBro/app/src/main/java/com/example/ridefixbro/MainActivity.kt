@@ -19,6 +19,7 @@ import com.example.ridefixbro.ui.pages.LoginScreen
 import com.example.ridefixbro.viewmodel.AuthViewModel
 import com.example.ridefixbro.viewmodel.ChatViewModel
 import com.example.ridefixbro.viewmodel.GarageViewModel
+import com.example.ridefixbro.viewmodel.AdminBikeViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -33,6 +34,9 @@ class MainActivity : ComponentActivity() {
             })
             val garageViewModel: GarageViewModel = viewModel(factory = viewModelFactory {
                 initializer { GarageViewModel(auth) }
+            })
+            val adminBikeViewModel: AdminBikeViewModel = viewModel(factory = viewModelFactory {
+                initializer { AdminBikeViewModel(auth) }
             })
             val authState by authViewModel.state.collectAsState()
             RideFixBroTheme {
@@ -51,7 +55,7 @@ class MainActivity : ComponentActivity() {
                     } else {
                         key(authState.profile!!.supabaseUserId) {
                             WorkspaceScreen(
-                                authState.profile!!, authState, chatViewModel, garageViewModel,
+                                authState.profile!!, authState, chatViewModel, garageViewModel, adminBikeViewModel,
                                 onRetryAuth = authViewModel::retry, onSignOut = authViewModel::signOut
                             )
                         }

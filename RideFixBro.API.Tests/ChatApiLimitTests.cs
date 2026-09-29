@@ -244,6 +244,7 @@ namespace RideFixBro.API.Tests
 		private readonly SqliteConnection _database = new("Data Source=:memory:");
 		private bool _seeded;
 		public DemoAgent Agent { get; } = new();
+		public IManualPublisher? ManualPublisher { get; init; }
 
 		public async Task<int> CreateChatAsync(HttpClient client, int? bikeId = null)
 		{
@@ -251,9 +252,14 @@ namespace RideFixBro.API.Tests
 			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 			var userId = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetInt32();
 			using var scope = Services.CreateScope();
-			var context = await scope.ServiceProvider.GetRequiredService<ChatSessionService>()
-				.CreateAsync(userId, bikeId, bikeId is null, CancellationToken.None);
-			return context.Id;
+			await scope.ServiceProvider.GetRequiredService<ChatSessionService>()
+				.PrepareNewAsync(userId, bikeId, bikeId is null, CancellationToken.None);
+			// Fixture setup for existing-chat scenarios; the production API does not save empty new chats.
+			var database = scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+			var row = new ChatSession { UserId = userId, UserBikeId = bikeId, IsActive = true, CreatedAt = DateTime.UtcNow };
+			database.ChatSessions.Add(row);
+			await database.SaveChangesAsync();
+			return row.Id;
 		}
 
 		public List<IMessage> History(int id, Guid? user = null)
@@ -304,7 +310,11 @@ namespace RideFixBro.API.Tests
 			builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?>
 			{
 				["Supabase:ValidIssuer"] = AuthTestTokens.Issuer,
-				["Supabase:ValidAudience"] = "authenticated"
+				["Supabase:ValidAudience"] = "authenticated",
+				["API_Keys:Gemini_Api_key"] = "test-key",
+				["Qdrant_Vector_DB:Cluster_Endpoint"] = "localhost",
+				["Qdrant_Vector_DB:API_Key"] = "test-key",
+				["Qdrant_Vector_DB:ManualCollection"] = "test-official"
 			}));
 			_database.Open();
 			builder.ConfigureServices(services =>
@@ -312,6 +322,11 @@ namespace RideFixBro.API.Tests
 				services.AddControllers().AddApplicationPart(typeof(UnrestrictedTestController).Assembly);
 				services.RemoveAll<IAgent>();
 				services.AddSingleton<IAgent>(Agent);
+				if (ManualPublisher is not null)
+				{
+					services.RemoveAll<IManualPublisher>();
+					services.AddSingleton(ManualPublisher);
+				}
 				services.RemoveAll<DbContextOptions<RideFixBroDbContext>>();
 				services.RemoveAll<IDbContextOptionsConfiguration<RideFixBroDbContext>>();
 				services.AddDbContext<RideFixBroDbContext>(options => options.UseSqlite(_database));

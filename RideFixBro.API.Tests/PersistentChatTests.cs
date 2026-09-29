@@ -54,7 +54,7 @@ public class PersistentChatTests
     [InlineData("model", HttpStatusCode.InternalServerError)]
     [InlineData("tool-budget", HttpStatusCode.UnprocessableEntity)]
     [InlineData("database", HttpStatusCode.ServiceUnavailable)]
-    public async Task FirstReplyFailureStillReturnsTheCreatedChatId(string failure, HttpStatusCode expected)
+    public async Task FailedFirstReplyLeavesNoNewChatOrMessages(string failure, HttpStatusCode expected)
     {
         await using var factory = new ChatApiFactory();
         using var client = factory.Client();
@@ -67,16 +67,59 @@ public class PersistentChatTests
         using var failed = await client.PostAsJsonAsync("/api/Chat/ask",
             new { sessionId = 0, isGeneral = true, message = "First attempt" });
         Assert.Equal(expected, failed.StatusCode);
-        var id = (await failed.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("sessionId").GetInt32();
-        Assert.True(id > 0);
-        Assert.Empty(factory.History(id));
-        factory.Agent.Reply = _ => Task.FromResult<IMessage>(new TextMessage(Role.Assistant, "Recovered"));
-        using var retried = await client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = id, message = "Retry" });
-        Assert.Equal(HttpStatusCode.OK, retried.StatusCode);
-        Assert.Equal(id, (await retried.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("sessionId").GetInt32());
+        Assert.Equal(JsonValueKind.Null, (await failed.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("sessionId").ValueKind);
         using var scope = factory.Services.CreateScope();
-        Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>().ChatSessions.CountAsync());
-        Assert.Equal(2, factory.History(id).Count);
+        var db = scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+        Assert.Empty(await db.ChatSessions.ToListAsync());
+        Assert.Empty(await db.Messages.ToListAsync());
+    }
+
+    [Fact]
+    public async Task FirstChatDoesNotExistUntilAnswerIsComplete()
+    {
+        await using var factory = new ChatApiFactory();
+        using var client = factory.Client();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        factory.Agent.Reply = async token =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return new TextMessage(Role.Assistant, "Complete answer");
+        };
+        var pending = client.PostAsJsonAsync("/api/Chat/ask", new { sessionId = 0, isGeneral = true, message = "Hi" });
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+            Assert.Empty(await db.ChatSessions.ToListAsync());
+            Assert.Empty(await db.Messages.ToListAsync());
+        }
+        finally { release.TrySetResult(); }
+        using var response = await pending;
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var verification = factory.Services.CreateScope();
+        Assert.Equal(1, await verification.ServiceProvider.GetRequiredService<RideFixBroDbContext>().ChatSessions.CountAsync());
+        Assert.Equal(2, await verification.ServiceProvider.GetRequiredService<RideFixBroDbContext>().Messages.CountAsync());
+    }
+
+    [Fact]
+    public async Task FailedDatabaseSaveRollsBackNewChatAndItsWholeFirstTurn()
+    {
+        await using var factory = new ChatApiFactory();
+        using var client = factory.Client();
+        using var profile = await client.GetAsync("/api/me");
+        using (var scope = factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>().Database.ExecuteSqlRawAsync(
+                "CREATE TRIGGER RejectAnswer BEFORE INSERT ON Messages WHEN NEW.Role = 'Assistant' BEGIN SELECT RAISE(ABORT, 'test-only failure'); END;");
+        using var failed = await client.PostAsJsonAsync("/api/Chat/ask",
+            new { sessionId = 0, isGeneral = true, message = "Do not leave an empty chat" });
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
+        using var verification = factory.Services.CreateScope();
+        var db = verification.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+        Assert.Empty(await db.ChatSessions.ToListAsync());
+        Assert.Empty(await db.Messages.ToListAsync());
     }
 
     [Theory]
@@ -166,7 +209,7 @@ public class PersistentChatTests
             var limits = new ChatLimitsOptions();
             var manager = new AiManagerService(agent, new SqlChatHistoryStore(db), limits,
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<AiManagerService>.Instance);
-            await manager.AskMechanicBro(new ChatContext(id, null), new ChatInput($"Question {turn}", null));
+            await manager.AskMechanicBro(new ChatContext(id, null, 1), new ChatInput($"Question {turn}", null));
         }
         ToolFlowTests.AssertValidSequence(handler.Requests[^1]);
         var toolRequest = handler.Requests[^1].GetProperty("messages").EnumerateArray()
@@ -232,7 +275,7 @@ public class PersistentChatTests
         var history = await store.LoadRecentAsync(id, 2, CancellationToken.None);
         Assert.Equal(4, history.Messages.Count);
         Assert.Equal("Question 54", Assert.IsType<TextMessage>(history.Messages[0]).Content);
-        await store.AppendTurnAsync(id, history,
+        await store.AppendTurnAsync(new ChatContext(id, null, 1), history,
             [new TextMessage(Role.User, "Question 56"), new TextMessage(Role.Assistant, "Answer 56")], CancellationToken.None);
         Assert.Equal(112, await db.Messages.CountAsync());
         var page = await client.GetFromJsonAsync<ChatDetail>($"/api/chats/{id}");
@@ -242,6 +285,7 @@ public class PersistentChatTests
         Assert.Equal(12, older!.Messages.Count);
         Assert.Equal("Question 1", older.Messages[0].Text);
         Assert.Null(older.NextBeforeSequence);
+        Assert.Equal(page.Chat.UpdatedAt, older.Chat.UpdatedAt);
     }
 
     [Fact]
@@ -250,7 +294,7 @@ public class PersistentChatTests
         using var handler = new RecordingHandler(ToolFlowTests.TextReply("No manual available"));
         var bike = new BikeContext(9, "Harley-Davidson", "X440", 2026, null);
         await ToolFlowTests.CreateManager(ToolFlowTests.CreateAgent(handler), new InMemoryChatStore())
-            .AskMechanicBro(new ChatContext(1, bike), new ChatInput("Question", null));
+            .AskMechanicBro(new ChatContext(1, bike, 1), new ChatInput("Question", null));
         Assert.DoesNotContain(handler.Requests[0].GetProperty("tools").EnumerateArray(), tool =>
             tool.GetProperty("function").GetProperty("name").GetString() == "SearchManualAsync");
     }
@@ -266,12 +310,76 @@ public class PersistentChatTests
         Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
         var list = await client.GetFromJsonAsync<List<ChatSummary>>("/api/chats");
         Assert.Equal(new[] { first, second }, list!.Select(chat => chat.Id));
-        var next = await client.GetFromJsonAsync<List<ChatSummary>>($"/api/chats?beforeId={first}");
+        var cursor = Uri.EscapeDataString(list![0].UpdatedAt.ToString("O"));
+        var next = await client.GetFromJsonAsync<List<ChatSummary>>($"/api/chats?beforeId={first}&beforeUpdatedAt={cursor}");
         Assert.Equal(second, Assert.Single(next!).Id);
         using var other = factory.Client();
         other.DefaultRequestHeaders.Authorization = new("Bearer", AuthTestTokens.Create(Guid.NewGuid()));
-        using var deniedCursor = await other.GetAsync($"/api/chats?beforeId={first}");
-        Assert.Equal(HttpStatusCode.NotFound, deniedCursor.StatusCode);
+        var otherPage = await other.GetFromJsonAsync<List<ChatSummary>>($"/api/chats?beforeId={first}&beforeUpdatedAt={cursor}");
+        Assert.Empty(otherPage!);
+    }
+
+    [Fact]
+    public async Task PaginationSurvivesCursorUpdatesAndDeletionWithoutRepeatedChats()
+    {
+        await using var factory = new ChatApiFactory();
+        using var client = factory.Client();
+        using var profile = await client.GetAsync("/api/me");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+            var user = await db.Users.SingleAsync();
+            var start = DateTime.UtcNow.AddDays(-1);
+            for (var i = 1; i <= 55; i++)
+                db.ChatSessions.Add(new ChatSession { UserId = user.Id, IsActive = true, CreatedAt = start.AddMinutes(i) });
+            await db.SaveChangesAsync();
+        }
+        var first = (await client.GetFromJsonAsync<List<ChatSummary>>("/api/chats"))!;
+        var cursor = first[^1];
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+            db.Messages.Add(new Message { ChatSessionId = cursor.Id, Role = "User", Content = "Changed",
+                TurnNumber = 1, SequenceNumber = 1, Timestamp = DateTime.UtcNow });
+            await db.SaveChangesAsync();
+        }
+        var url = $"/api/chats?beforeId={cursor.Id}&beforeUpdatedAt={Uri.EscapeDataString(cursor.UpdatedAt.ToString("O"))}";
+        var next = (await client.GetFromJsonAsync<List<ChatSummary>>(url))!;
+        Assert.Equal(5, next.Count);
+        Assert.Empty(first.Select(chat => chat.Id).Intersect(next.Select(chat => chat.Id)));
+        using var deleted = await client.DeleteAsync($"/api/chats/{cursor.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        Assert.Equal(next.Select(chat => chat.Id), (await client.GetFromJsonAsync<List<ChatSummary>>(url))!.Select(chat => chat.Id));
+        using var incompleteCursor = await client.GetAsync($"/api/chats?beforeId={cursor.Id}");
+        Assert.Equal(HttpStatusCode.BadRequest, incompleteCursor.StatusCode);
+    }
+
+    [Fact]
+    public async Task HardDeleteRequiresOwnerAndRemovesOnlyThatChatAndItsMessages()
+    {
+        await using var factory = new ChatApiFactory();
+        using var owner = factory.Client();
+        using var other = factory.Client();
+        using var anonymous = factory.Client(false);
+        other.DefaultRequestHeaders.Authorization = new("Bearer", AuthTestTokens.Create(Guid.NewGuid()));
+        var id = await factory.CreateChatAsync(owner);
+        var otherId = await factory.CreateChatAsync(other);
+        using var sent = await owner.PostAsJsonAsync("/api/Chat/ask", new { sessionId = id, message = "Saved" });
+        Assert.Equal(HttpStatusCode.OK, sent.StatusCode);
+        using var unauthenticated = await anonymous.DeleteAsync($"/api/chats/{id}");
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+        using var denied = await other.DeleteAsync($"/api/chats/{id}");
+        Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+        using var deleted = await owner.DeleteAsync($"/api/chats/{id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        using var reopen = await owner.GetAsync($"/api/chats/{id}");
+        Assert.Equal(HttpStatusCode.NotFound, reopen.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+        Assert.False(await db.ChatSessions.AnyAsync(chat => chat.Id == id));
+        Assert.False(await db.Messages.AnyAsync(message => message.ChatSessionId == id));
+        Assert.True(await db.ChatSessions.AnyAsync(chat => chat.Id == otherId));
+        Assert.Equal(2, await db.Users.CountAsync());
     }
 
     [Fact]
@@ -288,10 +396,10 @@ public class PersistentChatTests
         var second = new SqlChatHistoryStore(secondDb);
         var stale = await first.LoadRecentAsync(id, 10, CancellationToken.None);
         var fresh = await second.LoadRecentAsync(id, 10, CancellationToken.None);
-        await second.AppendTurnAsync(id, fresh,
+        await second.AppendTurnAsync(new ChatContext(id, null, 1), fresh,
             [new TextMessage(Role.User, "saved user"), new TextMessage(Role.Assistant, "saved answer")], CancellationToken.None);
         // SQLite enforces the same unique sequence invariant; SQL Server additionally maps this to HTTP 409.
-        await Assert.ThrowsAsync<DbUpdateException>(() => first.AppendTurnAsync(id, stale,
+        await Assert.ThrowsAsync<DbUpdateException>(() => first.AppendTurnAsync(new ChatContext(id, null, 1), stale,
             [new TextMessage(Role.User, "stale user"), new TextMessage(Role.Assistant, "stale answer")], CancellationToken.None));
         var saved = factory.History(id);
         Assert.Equal(2, saved.Count);
@@ -326,11 +434,12 @@ public class PersistentChatTests
         var garage = await added.Content.ReadFromJsonAsync<JsonElement>();
         Assert.False(garage.TryGetProperty("manualKey", out _));
         var garageId = garage.GetProperty("id").GetInt32();
+        var id = await factory.CreateChatAsync(owner, garageId);
         ChatContext context;
         using (var scope = factory.Services.CreateScope())
         {
             var sessions = scope.ServiceProvider.GetRequiredService<ChatSessionService>();
-            context = await sessions.CreateAsync(userId, garageId, false, CancellationToken.None);
+            context = await sessions.GetContextAsync(userId, id, CancellationToken.None);
             Assert.Equal("catalog-key", context.Bike!.ManualKey);
             Assert.Equal(garageId, context.Bike.UserBikeId);
             Assert.Equal(context, await sessions.GetContextAsync(userId, context.Id, CancellationToken.None));

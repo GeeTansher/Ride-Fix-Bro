@@ -14,3 +14,5 @@ data class GarageBike(
 }
 
 data class AddGarageBikeRequest(val bikeId: Int)
+
+data class BikePublicationResponse(val bike: CatalogBike, val manualKey: String, val chunks: Int, val skippedPages: Int)

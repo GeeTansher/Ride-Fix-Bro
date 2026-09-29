@@ -63,6 +63,7 @@ builder.Services.AddRateLimiter(options =>
 // services
 builder.Services.AddScoped<AiManagerService>();
 builder.Services.AddSingleton<VectorDbService>();
+builder.Services.AddSingleton<IManualPublisher>(services => services.GetRequiredService<VectorDbService>());
 builder.Services.AddScoped<IChatHistoryStore, SqlChatHistoryStore>();
 builder.Services.AddSingleton<ChatClient>(services =>
 {
