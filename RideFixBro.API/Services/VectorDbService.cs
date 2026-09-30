@@ -24,6 +24,7 @@ public partial class VectorDbService : IManualPublisher
     private const int MaxChunks = 2000;
     private readonly QdrantClient _qdrantClient;
     private readonly EmbeddingClient _embeddingClient;
+    private readonly ManualEmbeddingClient _manualEmbeddings;
     private readonly string _collectionName;
     // Same process mein ek upload; multiple app instances ke liye controller SQL publication lock bhi leta hai.
     private readonly SemaphoreSlim _uploadGate = new(1, 1);
@@ -43,6 +44,12 @@ public partial class VectorDbService : IManualPublisher
         _qdrantClient = new QdrantClient(host: host, https: true, apiKey: key,
             grpcTimeout: TimeSpan.FromSeconds(ApiTimeouts.Seconds));
         _embeddingClient = OpenAIClientBuilder.Create(geminiKey).GetEmbeddingClient("gemini-embedding-2-preview");
+        // Upload-only budget below the project's 100 RPM / 30k TPM, leaving room for search.
+        // Azure overrides: EmbeddingUpload__RequestsPerMinute / EmbeddingUpload__TokensPerMinute.
+        // Daily quota is still enforced by Google; waiting cannot restore an exhausted daily allowance.
+        _manualEmbeddings = new ManualEmbeddingClient(_embeddingClient,
+            config.GetValue("EmbeddingUpload:RequestsPerMinute", 80),
+            config.GetValue("EmbeddingUpload:TokensPerMinute", 24_000));
     }
 
     // Ye real method hi [Function] hai, dummy overload nahi. MechanicBroAgent generated schema se key/token hata kar
@@ -152,12 +159,13 @@ public partial class VectorDbService : IManualPublisher
         for (var index = 0; index < chunks.Count; index++)
         {
             token.ThrowIfCancellationRequested();
-            var embedding = await _embeddingClient.GenerateEmbeddingAsync(chunks[index], cancellationToken: token);
+            // Wait/retry only this embedding when its provider budget is exhausted; Qdrant is not the limiter.
+            var embedding = await _manualEmbeddings.GenerateAsync(chunks[index], token);
             await _qdrantClient.UpsertAsync(_collectionName, new[]
             {
                 new PointStruct
                 {
-                    Id = Guid.NewGuid(), Vectors = embedding.Value.ToFloats().ToArray(),
+                    Id = Guid.NewGuid(), Vectors = embedding.ToArray(),
                     Payload = { ["manual_key"] = manualKey, ["revision"] = revision, ["kind"] = "chunk",
                         ["text"] = chunks[index], ["chunk_number"] = index + 1 }
                 }

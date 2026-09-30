@@ -60,6 +60,20 @@ public class AdminBikePublicationTests
         Assert.Empty(await db.UserBikes.ToListAsync());
     }
 
+    [Fact]
+    public async Task PdfPublicationDoesNotInheritTheFivePerMinuteChatLimit()
+    {
+        var publisher = new FakePublisher();
+        await using var factory = new ChatApiFactory { ManualPublisher = publisher };
+        using var admin = await AdminClient(factory);
+        for (var index = 0; index < 6; index++)
+        {
+            using var response = await admin.PostAsync("/api/admin/bikes", Form());
+            Assert.Equal(index == 0 ? HttpStatusCode.Created : HttpStatusCode.OK, response.StatusCode);
+        }
+        Assert.Equal(6, publisher.Calls);
+    }
+
     [Theory]
     [InlineData("make")]
     [InlineData("model")]
@@ -88,6 +102,34 @@ public class AdminBikePublicationTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         using var scope = factory.Services.CreateScope();
         Assert.Empty(await scope.ServiceProvider.GetRequiredService<RideFixBroDbContext>().MasterBikes.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EmbeddingQuotaFailureIdentifiesProviderAndNeverReportsASavedBike(bool existingBike)
+    {
+        var publisher = new FakePublisher
+        {
+            Failure = new ChatInputException("Gemini embedding quota is exhausted. Check TPM/RPM and daily quota.", 429)
+        };
+        await using var factory = new ChatApiFactory { ManualPublisher = publisher };
+        using var admin = await AdminClient(factory);
+        if (existingBike)
+        {
+            using var setup = factory.Services.CreateScope();
+            var db = setup.ServiceProvider.GetRequiredService<RideFixBroDbContext>();
+            db.MasterBikes.Add(new MasterBike { Id = 101, Make = "Harley-Davidson", Model = "X440", Year = 2024, ManualKey = "x440-2024" });
+            await db.SaveChangesAsync();
+        }
+        using var response = await admin.PostAsync(existingBike ? "/api/admin/bikes/101/manual" : "/api/admin/bikes", Form());
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.Contains("Gemini embedding quota", await response.Content.ReadAsStringAsync());
+        using var verification = factory.Services.CreateScope();
+        var rows = await verification.ServiceProvider.GetRequiredService<RideFixBroDbContext>().MasterBikes.ToListAsync();
+        Assert.Equal(existingBike ? 1 : 0, rows.Count);
+        if (existingBike) Assert.Equal("x440-2024", rows.Single().ManualKey);
+        Assert.Equal(1, publisher.Calls);
     }
 
     [Fact]

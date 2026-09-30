@@ -6,10 +6,9 @@ RideFix Bro is an AI motorcycle assistant that searches technical manuals via RA
 and retrieves current information through web search. It uses a **.NET 10 API**
 backend and a **Kotlin Jetpack Compose** Android frontend.
 
-## Demo limits and disabled uploads
+## Demo limits and manual uploads
 
-The application currently targets a controlled demonstration, not a publicly
-authenticated service. Limits are configured in the `Chat` section of
+The application currently targets a controlled demonstration. Chat limits are configured in the `Chat` section of
 `RideFixBro.API\appsettings.json`. Override these values through Azure App Service
 settings using double underscores, for example `Chat__RequestsPerMinute`.
 Restart the application after changing the configuration. Zero or negative
@@ -84,16 +83,25 @@ POST /api/Chat/upload-dummy-manual
 POST /api/Chat/upload-pdf-manual
 ```
 
-Existing Qdrant manuals remain searchable. Ingestion service methods are retained
-for future administrative functionality, but HTTP upload routes, administrator
-authentication, administrator roles, and an upload interface are not currently
-enabled. Reintroducing uploads requires server-side authentication and
-authorization; client-side visibility or an `isAdmin` flag does not grant access.
+Official manual uploads use the separate SQL-Admin-authorized routes under
+`/api/admin/bikes`; they do not inherit the chat request-rate policy. PDF embedding
+requests use a local rolling budget of 80 requests and 24,000 input tokens per
+minute by default, leaving headroom below the project's embedding quota.
+Reported token usage is retained between uploads in the running service; a
+conservative text-size reservation is used before each call. Gemini `429`
+responses trigger at most two retries of that chunk, honoring `Retry-After`
+when available. Persistent quota exhaustion is reported explicitly and does not
+publish the incomplete manual.
+
+This pacing does not raise Google's project-wide or daily quota and cannot
+account for other applications using the project. Large paced uploads can still
+exceed hosting/proxy timeouts; successful publication is confirmed only after
+all chunks, publication metadata, cleanup, and catalog saving complete.
 
 Limits are process-local: they reset on restart and are not shared across
-instances. Sessions are stored in memory, and the turn limit applies per
-conversation rather than to the total number of sessions. These controls do
-**not** make the chat API private. Configure network access restrictions
+instances. Saved chats and complete turns are stored in SQL, and the model
+context limit applies per conversation. Rate controls do not replace
+authentication or network access restrictions. Configure network access restrictions
 separately; this implementation does not modify Azure access restrictions,
 Key Vault configuration, or authentication settings.
 

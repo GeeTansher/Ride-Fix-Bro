@@ -17,6 +17,7 @@ public sealed class AdminManualsController(RideFixBroDbContext database, IManual
     // Qdrant_Vector_DB:ManualCollection (Azure setting: Qdrant_Vector_DB__ManualCollection). No fallback.
     // POST form fields: make, model, year, manualKey, file (PDF), skipPages (default 0).
     // Same make/model/year + same key is a re-upload. A new catalog row is saved only after publication succeeds.
+    // EmbeddingUpload settings pace Google calls, not Qdrant writes. Large paced PDFs may outlast hosting timeouts.
     [HttpPost]
     public async Task<IActionResult> PublishBike([FromForm] PublishBikeRequest request, CancellationToken token)
     {
@@ -51,7 +52,11 @@ public sealed class AdminManualsController(RideFixBroDbContext database, IManual
             return StatusCode(created ? 201 : 200, response);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (ChatInputException) { throw; }
+        catch (ChatInputException ex)
+        {
+            if (ex.StatusCode == 429) logger.LogWarning("Official manual publication stopped by embedding provider quota.");
+            throw;
+        }
         catch (Exception ex)
         {
             token.ThrowIfCancellationRequested();
@@ -76,7 +81,11 @@ public sealed class AdminManualsController(RideFixBroDbContext database, IManual
             return Ok(await publisher.ReplaceManualAsync(pdf, bike.ManualKey, request.SkipPages, token));
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (ChatInputException) { throw; }
+        catch (ChatInputException ex)
+        {
+            if (ex.StatusCode == 429) logger.LogWarning("Manual replacement stopped by embedding provider quota for bike {BikeId}.", bikeId);
+            throw;
+        }
         catch (Exception ex)
         {
             token.ThrowIfCancellationRequested();
