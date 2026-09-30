@@ -392,11 +392,20 @@ configuration.
 | Path | Responsibility |
 |---|---|
 | `RideFixBro.API\Controllers` | Authenticated HTTP endpoints, resource ownership, and request handling |
-| `RideFixBro.API\Services` | Chat orchestration, catalog/garage logic, manual retrieval/publication, and quota pacing |
-| `RideFixBro.API\Agents` | AutoGen contracts, tool execution, and Gemini message conversion |
+| `RideFixBro.API\Common` | Shared chat input validation and application exceptions |
+| `RideFixBro.API\Configuration` | Chat budgets, API timeouts, and the request-body limit attribute |
+| `RideFixBro.API\Services` | Chat orchestration, user profiles, saved-chat queries, and garage logic |
+| `RideFixBro.API\Services\AgentToolsService` | Tavily web search and Qdrant manual retrieval/publication |
+| `RideFixBro.API\Services\BackgroundProcess\ManualPublish` | Durable job submission/status handling and the hosted publication worker |
+| `RideFixBro.API\Services\BackgroundProcess\ManualPublish\Helper` | Worker wake-up queue, SQL publication locks, and embedding quota pacing |
+| `RideFixBro.API\Services\BackgroundProcess\ManualPublish\Interface` | The manual-publisher contract used by the worker |
+| `RideFixBro.API\Agents` | AutoGen agent setup, generated tool contracts, and execution middleware |
+| `RideFixBro.API\Agents\Helper` | Gemini message conversion and OpenAI-compatible client construction |
 | `RideFixBro.API\Authentication` | Supabase token validation and trusted application claims |
 | `RideFixBro.API\DataStore` | Ordered SQL history persistence and provider-message serialization |
-| `RideFixBro.API\Models` | HTTP DTOs and separate backend chat/bike context |
+| `RideFixBro.API\Models\ChatModels` | Chat request/response DTOs and internal chat/bike context |
+| `RideFixBro.API\Models\GarageModels` | Bike catalog and garage DTOs |
+| `RideFixBro.API\Models\ManualPublishModels` | PDF submission DTOs, publication work, job responses, and status values |
 | `RideFixBro.Data\Entities` | Database-first EF Core context and scaffolded entities |
 | `RideFixBro.Data\Scripts` | Reviewable SQL schema and access scripts |
 | `RideFixBro.AndroidUI\RideFixBro\app` | Android UI, ViewModels, authentication, networking, and tests |
@@ -404,8 +413,9 @@ configuration.
 
 The relational model separates application data in `RideFix` from catalog data
 in `RideFix_Customs`. Its core entities are users, roles, catalog bikes, garage
-bikes, chat sessions, ordered messages, and durable manual-publication jobs. Database changes follow reviewed SQL
-scripts and scaffolding rather than hand-editing generated entity files.
+bikes, chat sessions, ordered messages, and durable manual-publication jobs.
+Database changes follow reviewed SQL scripts and scaffolding rather than
+hand-editing generated entity files.
 
 ## Verification
 
@@ -435,6 +445,20 @@ Set-Location .\RideFixBro.AndroidUI\RideFixBro
 Backend tests use isolated databases, test doubles, and recorded provider
 responses rather than live provider quota. JVM tests, UI compilation, and
 mocked API tests are distinct from physical-device and deployed-service checks.
+
+### Publication smoke check
+
+Use matching backend and Android versions: PDF submission now returns a job
+response, not a completed publication result.
+
+1. With an Admin account, submit a small text-based PDF and confirm the API returns `202` with a job ID.
+2. Observe `Queued` / `Processing` and chunk progress. Reopen the Admin screen to verify that it recovers the same saved job.
+3. Wait for `Succeeded`; a complete chunk count alone is not proof that finalization and catalog saving finished.
+4. Verify the catalog bike is available, add it to the garage, and ask a bike-specific question covered by the manual.
+
+If a job becomes `Failed`, inspect its reported error and server logs before
+submitting again. Do not manually activate a revision containing incomplete
+chunks. Hosting idle/restart limitations still apply as described above.
 
 ## License
 
