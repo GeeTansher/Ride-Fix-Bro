@@ -15,5 +15,7 @@ public partial class MasterBike
 
     public string? ManualKey { get; set; }
 
+    public virtual ICollection<ManualPublicationJob> ManualPublicationJobs { get; set; } = new List<ManualPublicationJob>();
+
     public virtual ICollection<UserBike> UserBikes { get; set; } = new List<UserBike>();
 }

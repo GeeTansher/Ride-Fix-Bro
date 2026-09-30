@@ -17,6 +17,8 @@ public partial class User
 
     public virtual ICollection<ChatSession> ChatSessions { get; set; } = new List<ChatSession>();
 
+    public virtual ICollection<ManualPublicationJob> ManualPublicationJobs { get; set; } = new List<ManualPublicationJob>();
+
     public virtual MasterUserRole Role { get; set; } = null!;
 
     public virtual ICollection<UserBike> UserBikes { get; set; } = new List<UserBike>();

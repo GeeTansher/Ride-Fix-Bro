@@ -13,6 +13,8 @@ public partial class RideFixBroDbContext : DbContext
 
     public virtual DbSet<ChatSession> ChatSessions { get; set; }
 
+    public virtual DbSet<ManualPublicationJob> ManualPublicationJobs { get; set; }
+
     public virtual DbSet<MasterBike> MasterBikes { get; set; }
 
     public virtual DbSet<MasterUserRole> MasterUserRoles { get; set; }
@@ -43,6 +45,36 @@ public partial class RideFixBroDbContext : DbContext
                 .HasPrincipalKey(p => new { p.Id, p.UserId })
                 .HasForeignKey(d => new { d.UserBikeId, d.UserId })
                 .HasConstraintName("FK_ChatSessions_UserBikeOwner");
+        });
+
+        modelBuilder.Entity<ManualPublicationJob>(entity =>
+        {
+            entity.ToTable("ManualPublicationJobs", "RideFix");
+
+            entity.HasIndex(e => new { e.CollectionName, e.ManualKey }, "UX_ManualPublicationJobs_ActiveManual")
+                .IsUnique()
+                .HasFilter("([CompletedAt] IS NULL)");
+
+            entity.Property(e => e.Id).HasDefaultValueSql("(newid())", "DF_ManualPublicationJobs_Id");
+            entity.Property(e => e.CollectionName).HasMaxLength(255);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(sysutcdatetime())", "DF_ManualPublicationJobs_CreatedAt");
+            entity.Property(e => e.Error).HasMaxLength(1000);
+            entity.Property(e => e.Make).HasMaxLength(100);
+            entity.Property(e => e.ManualKey).HasMaxLength(128);
+            entity.Property(e => e.Model).HasMaxLength(100);
+            entity.Property(e => e.Status)
+                .HasMaxLength(16)
+                .HasDefaultValue("Queued", "DF_ManualPublicationJobs_Status");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysutcdatetime())", "DF_ManualPublicationJobs_UpdatedAt");
+
+            entity.HasOne(d => d.Bike).WithMany(p => p.ManualPublicationJobs)
+                .HasForeignKey(d => d.BikeId)
+                .HasConstraintName("FK_ManualPublicationJobs_MasterBikes");
+
+            entity.HasOne(d => d.SubmittedByUser).WithMany(p => p.ManualPublicationJobs)
+                .HasForeignKey(d => d.SubmittedByUserId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_ManualPublicationJobs_Users");
         });
 
         modelBuilder.Entity<MasterBike>(entity =>
