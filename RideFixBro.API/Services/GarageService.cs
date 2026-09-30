@@ -1,6 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
-using RideFixBro.API.Models;
+using RideFixBro.API.Models.GarageModels;
 using RideFixBro.Data.Entities;
 
 namespace RideFixBro.API.Services

@@ -9,13 +9,17 @@ using RideFixBro.API.Authentication;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
-using RideFixBro.API.Filters;
 using RideFixBro.API.Services;
 using RideFixBro.Data.Entities;
 using Scalar.AspNetCore;
 using System.Globalization;
 using System.Threading.RateLimiting;
 using System.Data.Common;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish.Interface;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish.Helper;
+using RideFixBro.API.Common;
+using RideFixBro.API.Agents.Helper;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -64,6 +68,9 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddScoped<AiManagerService>();
 builder.Services.AddSingleton<VectorDbService>();
 builder.Services.AddSingleton<IManualPublisher>(services => services.GetRequiredService<VectorDbService>());
+builder.Services.AddSingleton<ManualPublicationQueue>();
+builder.Services.AddScoped<ManualPublicationJobsService>();
+builder.Services.AddHostedService<ManualPublicationWorker>();
 builder.Services.AddScoped<IChatHistoryStore, SqlChatHistoryStore>();
 builder.Services.AddSingleton<ChatClient>(services =>
 {

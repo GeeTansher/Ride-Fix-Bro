@@ -1,4 +1,4 @@
-namespace RideFixBro.API.Services
+namespace RideFixBro.API.Common
 {
 	public sealed class ChatInputException : ArgumentException
 	{

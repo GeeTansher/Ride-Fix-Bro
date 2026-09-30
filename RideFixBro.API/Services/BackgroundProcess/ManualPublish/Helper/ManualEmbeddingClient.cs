@@ -1,9 +1,10 @@
 using OpenAI.Embeddings;
+using RideFixBro.API.Common;
 using System.ClientModel;
 using System.Globalization;
 using System.Text;
 
-namespace RideFixBro.API.Services;
+namespace RideFixBro.API.Services.BackgroundProcess.ManualPublish.Helper;
 
 // Used only by the serialized PDF upload loop, not by chat/query embeddings.
 // Local accounting leaves headroom; Google still enforces project-wide usage across all app instances.

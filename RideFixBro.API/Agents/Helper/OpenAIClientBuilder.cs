@@ -5,7 +5,7 @@ using System.ClientModel;
 using System.ClientModel.Primitives;
 using RideFixBro.API.Configuration;
 
-namespace RideFixBro.API.Agents
+namespace RideFixBro.API.Agents.Helper
 {
 	public class OpenAIClientBuilder
 	{

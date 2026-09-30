@@ -2,11 +2,11 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using RideFixBro.API.Configuration;
-using RideFixBro.API.Filters;
-using RideFixBro.API.Models;
 using RideFixBro.API.Services;
 using System.Security.Claims;
 using System.Globalization;
+using RideFixBro.API.Common;
+using RideFixBro.API.Models.ChatModels;
 
 namespace RideFixBro.API.Controllers
 {

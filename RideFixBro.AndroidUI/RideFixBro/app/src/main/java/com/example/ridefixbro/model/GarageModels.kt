@@ -15,4 +15,12 @@ data class GarageBike(
 
 data class AddGarageBikeRequest(val bikeId: Int)
 
-data class BikePublicationResponse(val bike: CatalogBike, val manualKey: String, val chunks: Int, val skippedPages: Int)
+data class ManualPublicationJob(
+    val id: String, val status: String, val make: String, val model: String, val year: Int,
+    val manualKey: String, val collectionName: String, val skipPages: Int,
+    val totalChunks: Int, val completedChunks: Int, val bikeId: Int?,
+    val error: String?, val createdAt: String, val updatedAt: String, val completedAt: String?
+) {
+    val finished: Boolean get() = status == "Succeeded" || status == "Failed"
+    val succeeded: Boolean get() = status == "Succeeded"
+}

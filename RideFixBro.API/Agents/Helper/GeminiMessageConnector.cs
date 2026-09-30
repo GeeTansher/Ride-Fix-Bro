@@ -3,7 +3,7 @@ using AutoGen.OpenAI;
 using OpenAI.Chat;
 using IMiddleware = AutoGen.Core.IMiddleware;
 
-namespace RideFixBro.API.Agents
+namespace RideFixBro.API.Agents.Helper
 {
 	internal sealed class GeminiMessageConnector : IMiddleware
 	{

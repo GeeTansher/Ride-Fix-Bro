@@ -2,8 +2,9 @@ using AutoGen.Core;
 using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore.Interfaces;
-using RideFixBro.API.Models;
 using RideFixBro.API.DataStore;
+using RideFixBro.API.Common;
+using RideFixBro.API.Models.ChatModels;
 
 namespace RideFixBro.API.Services
 {

@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
+using RideFixBro.API.Common;
 using RideFixBro.API.DataStore;
-using RideFixBro.API.Models;
+using RideFixBro.API.Models.ChatModels;
+using RideFixBro.API.Models.GarageModels;
 using RideFixBro.Data.Entities;
 
 namespace RideFixBro.API.Services;

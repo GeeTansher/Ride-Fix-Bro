@@ -18,6 +18,9 @@ using System.Net.Http.Json;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish.Interface;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish;
+using RideFixBro.API.Common;
 
 namespace RideFixBro.API.Tests
 {
@@ -262,6 +265,12 @@ namespace RideFixBro.API.Tests
 			return row.Id;
 		}
 
+		public async Task<bool> ProcessNextPublicationAsync(CancellationToken token = default)
+		{
+			using var scope = Services.CreateScope();
+			return await scope.ServiceProvider.GetRequiredService<ManualPublicationJobsService>().ProcessNextAsync(token);
+		}
+
 		public List<IMessage> History(int id, Guid? user = null)
 		{
 			using var scope = Services.CreateScope();
@@ -319,6 +328,9 @@ namespace RideFixBro.API.Tests
 			_database.Open();
 			builder.ConfigureServices(services =>
 			{
+				// API tests control worker execution explicitly after EnsureCreated/fixture setup.
+				var worker = services.SingleOrDefault(service => service.ImplementationType == typeof(ManualPublicationWorker));
+				if (worker is not null) services.Remove(worker);
 				services.AddControllers().AddApplicationPart(typeof(UnrestrictedTestController).Assembly);
 				services.RemoveAll<IAgent>();
 				services.AddSingleton<IAgent>(Agent);

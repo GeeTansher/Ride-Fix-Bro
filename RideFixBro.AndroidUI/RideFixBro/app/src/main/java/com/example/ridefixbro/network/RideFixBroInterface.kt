@@ -19,7 +19,7 @@ import retrofit2.http.Multipart
 import retrofit2.http.Part
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
-import com.example.ridefixbro.model.BikePublicationResponse
+import com.example.ridefixbro.model.ManualPublicationJob
 
 interface RideFixApiInterface {
     @GET("api/chats")
@@ -43,7 +43,13 @@ interface RideFixApiInterface {
         @Part("skipPages") skipPages: RequestBody,
         @Part file: MultipartBody.Part,
         @Header("Authorization") authorization: String
-    ): BikePublicationResponse
+    ): ManualPublicationJob
+
+    @GET("api/admin/manual-jobs")
+    suspend fun manualJobs(@Header("Authorization") authorization: String): List<ManualPublicationJob>
+
+    @GET("api/admin/manual-jobs/{id}")
+    suspend fun manualJob(@Path("id") id: String, @Header("Authorization") authorization: String): ManualPublicationJob
 
     // Ye apne .NET backend ka endpoint hai
     @POST("api/Chat/ask")

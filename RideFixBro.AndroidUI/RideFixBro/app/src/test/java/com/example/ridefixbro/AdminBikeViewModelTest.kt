@@ -4,8 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import com.example.ridefixbro.auth.AuthRepository
-import com.example.ridefixbro.model.BikePublicationResponse
-import com.example.ridefixbro.model.CatalogBike
+import com.example.ridefixbro.model.ManualPublicationJob
 import com.example.ridefixbro.model.response.UserProfileResponse
 import com.example.ridefixbro.network.RideFixApiInterface
 import com.example.ridefixbro.viewmodel.AdminBikeForm
@@ -27,6 +26,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -51,7 +51,8 @@ class AdminBikeViewModelTest {
     private val api = mockk<RideFixApiInterface>()
     private val admin = UserProfileResponse(1, "user-a", "a@example.test", "Admin")
     private val form = AdminBikeForm(" Harley-Davidson ", " X440 ", "2024", " x440-2024 ", "1")
-    private val result = BikePublicationResponse(CatalogBike(101, "Harley-Davidson", "X440", 2024), "x440-2024", 3, 1)
+    private val queued = job("Queued")
+    private val completed = job("Succeeded")
     private val file = MultipartBody.Part.createFormData("file", "manual.pdf",
         "%PDF-test".toRequestBody("application/pdf".toMediaType()))
 
@@ -60,7 +61,9 @@ class AdminBikeViewModelTest {
         Dispatchers.setMain(dispatcher)
         every { auth.sessionStatus } returns statuses
         coEvery { auth.accessToken(any()) } returns "token"
-        coEvery { api.publishBike(any(), any(), any(), any(), any(), any(), any()) } returns result
+        coEvery { api.publishBike(any(), any(), any(), any(), any(), any(), any()) } returns queued
+        coEvery { api.manualJobs(any()) } returns emptyList()
+        coEvery { api.manualJob(any(), any()) } returns completed
     }
 
     @After
@@ -87,22 +90,31 @@ class AdminBikeViewModelTest {
     }
 
     @Test
-    fun adminPublishesAllFieldsAndShowsSuccessOnlyAfterCompletion() = runTest(dispatcher) {
-        val pending = CompletableDeferred<BikePublicationResponse>()
+    fun acceptedSubmissionIsNotSuccessUntilStatusReportsCompletion() = runTest(dispatcher) {
+        val pending = CompletableDeferred<ManualPublicationJob>()
         coEvery { api.publishBike(any(), any(), any(), any(), any(), any(), any()) } coAnswers { pending.await() }
         val model = model()
         statuses.value = authenticated("user-a")
+        runCurrent()
+        model.observeJobs(admin)
         runCurrent()
         model.updateForm(form)
         model.selectPdf("user-a", "content://test/manual", "manual.pdf")
         model.publish(admin, file)
         runCurrent()
         assertTrue(model.state.value.loading)
-        assertNull(model.state.value.published)
-        pending.complete(result)
+        assertNull(model.state.value.job)
+        coEvery { api.manualJobs(any()) } returns listOf(queued)
+        pending.complete(queued)
         runCurrent()
         assertFalse(model.state.value.loading)
-        assertEquals(result, model.state.value.published)
+        assertEquals(queued, model.state.value.job)
+        assertTrue(model.state.value.busy)
+        assertFalse(model.state.value.job!!.succeeded)
+        advanceTimeBy(3_000)
+        runCurrent()
+        assertEquals(completed, model.state.value.job)
+        assertFalse(model.state.value.busy)
         coVerify(exactly = 1) {
             api.publishBike(match { text(it) == "Harley-Davidson" }, match { text(it) == "X440" },
                 match { text(it) == "2024" }, match { text(it) == "x440-2024" }, match { text(it) == "1" }, file, any())
@@ -120,13 +132,13 @@ class AdminBikeViewModelTest {
         model.publish(admin, file)
         runCurrent()
         assertFalse(model.state.value.loading)
-        assertNull(model.state.value.published)
+        assertNull(model.state.value.job)
         assertNotNull(model.state.value.error)
     }
 
     @Test
     fun lateUploadResultAndPdfCannotPopulateAnotherAccount() = runTest(dispatcher) {
-        val pending = CompletableDeferred<BikePublicationResponse>()
+        val pending = CompletableDeferred<ManualPublicationJob>()
         coEvery { api.publishBike(any(), any(), any(), any(), any(), any(), any()) } coAnswers {
             withContext(NonCancellable) { pending.await() }
         }
@@ -139,10 +151,10 @@ class AdminBikeViewModelTest {
         runCurrent()
         statuses.value = authenticated("user-b")
         runCurrent()
-        pending.complete(result)
+        pending.complete(queued)
         model.selectPdf("user-a", "content://test/late", "old.pdf")
         runCurrent()
-        assertNull(model.state.value.published)
+        assertNull(model.state.value.job)
         assertNull(model.state.value.pdfUri)
         assertEquals(AdminBikeForm(), model.state.value.form)
         assertFalse(model.state.value.loading)
@@ -156,9 +168,84 @@ class AdminBikeViewModelTest {
         assertNotNull(model.state.value.error)
     }
 
+    @Test
+    fun reopeningAdminScreenRecoversActiveJobWithoutUploadingAgain() = runTest(dispatcher) {
+        coEvery { api.manualJobs(any()) } returns listOf(job("Processing", completedChunks = 2))
+        val model = model()
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        model.observeJobs(admin)
+        runCurrent()
+        assertEquals(2, model.state.value.job?.completedChunks)
+        coVerify(exactly = 0) { api.publishBike(any(), any(), any(), any(), any(), any(), any()) }
+        model.stopObserving()
+        advanceTimeBy(9_000)
+        runCurrent()
+        coVerify(exactly = 0) { api.manualJob(any(), any()) }
+        model.observeJobs(admin)
+        runCurrent()
+        advanceTimeBy(3_000)
+        runCurrent()
+        assertTrue(model.state.value.job!!.succeeded)
+    }
+
+    @Test
+    fun failedJobShowsServerErrorAndNeverMarksCatalogPublicationSuccessful() = runTest(dispatcher) {
+        coEvery { api.manualJobs(any()) } returns listOf(queued)
+        coEvery { api.manualJob(any(), any()) } returns job("Failed", error = "Provider quota exhausted.")
+        val model = model()
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        model.observeJobs(admin)
+        runCurrent()
+        advanceTimeBy(3_000)
+        runCurrent()
+        assertTrue(model.state.value.job!!.finished)
+        assertFalse(model.state.value.job!!.succeeded)
+        assertEquals("Provider quota exhausted.", model.state.value.job?.error)
+        advanceTimeBy(9_000)
+        runCurrent()
+        coVerify(exactly = 1) { api.manualJob(any(), any()) }
+    }
+
+    @Test
+    fun regularUserDoesNotLoadAdminJobs() = runTest(dispatcher) {
+        val model = model()
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        model.observeJobs(admin.copy(role = "User"))
+        runCurrent()
+        coVerify(exactly = 0) { api.manualJobs(any()) }
+    }
+
+    @Test
+    fun lateStatusCannotPopulateAnotherAccount() = runTest(dispatcher) {
+        val pending = CompletableDeferred<ManualPublicationJob>()
+        coEvery { api.manualJobs(any()) } returns listOf(queued)
+        coEvery { api.manualJob(any(), any()) } coAnswers { withContext(NonCancellable) { pending.await() } }
+        val model = model()
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        model.observeJobs(admin)
+        runCurrent()
+        advanceTimeBy(3_000)
+        runCurrent()
+        statuses.value = authenticated("user-b")
+        runCurrent()
+        pending.complete(completed)
+        runCurrent()
+        assertNull(model.state.value.job)
+        assertTrue(model.state.value.jobs.isEmpty())
+    }
+
+    private fun job(status: String, completedChunks: Int = if (status == "Succeeded") 3 else 0, error: String? = null) =
+        ManualPublicationJob("00000000-0000-0000-0000-000000000001", status, "Harley-Davidson", "X440", 2024,
+            "x440-2024", "official", 1, 3, completedChunks, if (status == "Succeeded") 101 else null,
+            error, "", "", if (status == "Succeeded" || status == "Failed") "" else null)
+
     private fun model(): AdminBikeViewModel = ViewModelProvider(store, object : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = AdminBikeViewModel(auth, api) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = AdminBikeViewModel(auth, api, api) as T
     })[AdminBikeViewModel::class.java]
 
     private fun text(body: RequestBody): String = Buffer().also { body.writeTo(it) }.readUtf8()

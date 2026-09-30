@@ -1,8 +1,8 @@
 using RideFixBro.API.Configuration;
-using RideFixBro.API.Models;
+using RideFixBro.API.Models.ChatModels;
 using StbImageSharp;
 
-namespace RideFixBro.API.Services
+namespace RideFixBro.API.Common
 {
 	public sealed class ChatInputValidator
 	{

@@ -4,6 +4,7 @@ using RideFixBro.API.Agents;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
 using RideFixBro.API.Models;
+using RideFixBro.API.Models.ChatModels;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;

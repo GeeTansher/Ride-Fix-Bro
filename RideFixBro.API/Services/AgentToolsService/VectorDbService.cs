@@ -2,8 +2,13 @@ using AutoGen.Core;
 using OpenAI.Embeddings;
 using Qdrant.Client;
 using Qdrant.Client.Grpc;
-using RideFixBro.API.Agents;
+using RideFixBro.API.Agents.Helper;
+using RideFixBro.API.Common;
 using RideFixBro.API.Configuration;
+using RideFixBro.API.Models.ManualPublishModels;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish.Helper;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish.Interface;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using UglyToad.PdfPig;
@@ -123,55 +128,84 @@ public partial class VectorDbService : IManualPublisher
         return passages.Length > 0 ? string.Join("\n---\n", passages) : null;
     }
 
-    public async Task<ManualUploadResult> ReplaceManualAsync(byte[] pdf, string manualKey, int skipPages, CancellationToken token)
+    public async Task PublishAsync(ManualPublicationWork work,
+        Func<int, CancellationToken, Task> saveCheckpoint, CancellationToken token)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(manualKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(work.ManualKey);
+        if (work.JobId == Guid.Empty || work.CollectionName != _collectionName ||
+            work.Chunks.Count is < 1 or > MaxChunks || work.CompletedChunks < 0 || work.CompletedChunks > work.Chunks.Count)
+            throw new InvalidOperationException("Invalid publication job or collection configuration.");
         if (!await _uploadGate.WaitAsync(0, token))
             throw new ChatInputException("Another manual upload is running. Retry afterwards.", 409);
         try
         {
-            // Parse -> stage -> publish -> cleanup. Publish se pehle failure aaye toh old manual active rehti hai.
-            var chunks = ExtractChunks(pdf, skipPages, token);
-            var revision = Guid.NewGuid().ToString("N");
-            await EnsureCollectionAsync(token);
-            await UploadChunksAsync(manualKey, revision, chunks, token);
-            await PublishRevisionAsync(manualKey, revision, token);
-            await RemoveOldRevisionsAsync(manualKey, revision, token);
-            return new(manualKey, chunks.Count, skipPages);
+            // HTTP already prepared/persisted text. Job ID fixes the revision and chunk IDs across restarts.
+            var revision = work.JobId.ToString("N");
+            await EnsureCollectionAsync(work.CompletedChunks > 0, token);
+            await VerifyCheckpointAsync(work, token);
+            await UploadChunksAsync(work, saveCheckpoint, token);
+            await saveCheckpoint(work.Chunks.Count, token);
+            await PublishRevisionAsync(work.ManualKey, revision, token);
+            await RemoveOldRevisionsAsync(work.ManualKey, revision, token);
         }
         finally { _uploadGate.Release(); }
     }
 
-    private async Task EnsureCollectionAsync(CancellationToken token)
+    private async Task EnsureCollectionAsync(bool resuming, CancellationToken token)
     {
         var collections = await _qdrantClient.ListCollectionsAsync(cancellationToken: token);
         if (!collections.Contains(_collectionName))
+        {
+            if (resuming)
+                throw new ChatInputException("The staging collection was removed. Submit the complete PDF as a new job.", 409);
             await _qdrantClient.CreateCollectionAsync(_collectionName,
                 new VectorParams { Size = Dimensions, Distance = Distance.Cosine }, cancellationToken: token);
+        }
         // Strict-mode filtering needs these Qdrant payload indexes, not SQL indexes.
         foreach (var field in new[] { "manual_key", "revision", "kind" })
             await _qdrantClient.CreatePayloadIndexAsync(_collectionName, field, PayloadSchemaType.Keyword,
                 wait: true, cancellationToken: token);
     }
 
-    private async Task UploadChunksAsync(string manualKey, string revision, IReadOnlyList<string> chunks, CancellationToken token)
+    private async Task VerifyCheckpointAsync(ManualPublicationWork work, CancellationToken token)
     {
-        for (var index = 0; index < chunks.Count; index++)
+        // Never skip acknowledged chunks if the target collection was cleared/changed outside the app.
+        foreach (var ids in Enumerable.Range(0, work.CompletedChunks)
+            .Select(index => new PointId { Uuid = ChunkId(work.JobId, index).ToString() }).Chunk(64))
+        {
+            var points = await _qdrantClient.RetrieveAsync(_collectionName, ids,
+                withPayload: false, withVectors: false, cancellationToken: token);
+            if (points.Count != ids.Length)
+                throw new ChatInputException("Previously staged chunks are missing. Submit the complete PDF as a new job.", 409);
+        }
+    }
+
+    private async Task UploadChunksAsync(ManualPublicationWork work,
+        Func<int, CancellationToken, Task> saveCheckpoint, CancellationToken token)
+    {
+        var revision = work.JobId.ToString("N");
+        for (var index = work.CompletedChunks; index < work.Chunks.Count; index++)
         {
             token.ThrowIfCancellationRequested();
             // Wait/retry only this embedding when its provider budget is exhausted; Qdrant is not the limiter.
-            var embedding = await _manualEmbeddings.GenerateAsync(chunks[index], token);
+            var embedding = await _manualEmbeddings.GenerateAsync(work.Chunks[index], token);
             await _qdrantClient.UpsertAsync(_collectionName, new[]
             {
                 new PointStruct
                 {
-                    Id = Guid.NewGuid(), Vectors = embedding.ToArray(),
-                    Payload = { ["manual_key"] = manualKey, ["revision"] = revision, ["kind"] = "chunk",
-                        ["text"] = chunks[index], ["chunk_number"] = index + 1 }
+                    Id = ChunkId(work.JobId, index), Vectors = embedding.ToArray(),
+                    Payload = { ["manual_key"] = work.ManualKey, ["revision"] = revision, ["kind"] = "chunk",
+                        ["text"] = work.Chunks[index], ["chunk_number"] = index + 1 }
                 }
             }, wait: true, cancellationToken: token);
+            // Save after acknowledged upsert. If SQL fails here, replay overwrites the same point instead of duplicating it.
+            await saveCheckpoint(index + 1, token);
         }
     }
+
+    internal static Guid ChunkId(Guid jobId, int index) =>
+        new(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"ridefix-chunk:{jobId:N}:{index.ToString(CultureInfo.InvariantCulture)}")).AsSpan(0, 16));
 
     private Task PublishRevisionAsync(string manualKey, string revision, CancellationToken token) =>
         // One metadata point is the publication switch. Its zero vector is excluded by kind=chunk.
@@ -245,5 +279,3 @@ public partial class VectorDbService : IManualPublisher
         return chunks;
     }
 }
-
-public record ManualUploadResult(string ManualKey, int Chunks, int SkippedPages);

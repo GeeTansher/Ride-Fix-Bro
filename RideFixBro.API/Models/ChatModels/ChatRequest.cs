@@ -1,7 +1,7 @@
 ﻿using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
-namespace RideFixBro.API.Models
+namespace RideFixBro.API.Models.ChatModels
 {
 	public class ChatRequest
 	{

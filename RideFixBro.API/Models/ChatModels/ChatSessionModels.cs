@@ -1,4 +1,6 @@
-namespace RideFixBro.API.Models;
+using RideFixBro.API.Models.GarageModels;
+
+namespace RideFixBro.API.Models.ChatModels;
 
 public record ChatSummary(int Id, string Title, GarageBikeResponse? Bike, bool IsGeneral, DateTime UpdatedAt);
 public record SavedChatMessage(int SequenceNumber, string Text, bool IsUser, bool PhotoNotStored);

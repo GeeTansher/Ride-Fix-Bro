@@ -1,6 +1,6 @@
 using AutoGen.Core;
 using OpenAI.Chat;
-using RideFixBro.API.Agents;
+using RideFixBro.API.Agents.Helper;
 using System.ClientModel.Primitives;
 using System.Text.Json;
 using DbMessage = RideFixBro.Data.Entities.Message;

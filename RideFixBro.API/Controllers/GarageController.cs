@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using RideFixBro.API.Models;
+using RideFixBro.API.Models.GarageModels;
 using RideFixBro.API.Services;
 using System.Globalization;
 using System.Security.Claims;

@@ -1,10 +1,11 @@
 using AutoGen.Core;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using RideFixBro.API.Common;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.DataStore.Interfaces;
-using RideFixBro.API.Models;
-using RideFixBro.API.Services;
+using RideFixBro.API.Models.ChatModels;
+using RideFixBro.API.Models.GarageModels;
 using RideFixBro.Data.Entities;
 using System.Net;
 using System.Net.Http.Json;

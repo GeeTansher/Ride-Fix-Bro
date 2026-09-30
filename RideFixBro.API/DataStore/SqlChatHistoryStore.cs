@@ -2,9 +2,9 @@ using AutoGen.Core;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using RideFixBro.API.DataStore.Interfaces;
-using RideFixBro.API.Services;
-using RideFixBro.API.Models;
 using RideFixBro.Data.Entities;
+using RideFixBro.API.Models.ChatModels;
+using RideFixBro.API.Common;
 
 namespace RideFixBro.API.DataStore;
 

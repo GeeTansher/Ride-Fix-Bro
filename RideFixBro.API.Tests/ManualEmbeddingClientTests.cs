@@ -1,5 +1,6 @@
 using OpenAI.Embeddings;
-using RideFixBro.API.Services;
+using RideFixBro.API.Common;
+using RideFixBro.API.Services.BackgroundProcess.ManualPublish.Helper;
 using System.ClientModel;
 using System.Net;
 using System.Text;

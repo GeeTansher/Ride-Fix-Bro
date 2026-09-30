@@ -135,9 +135,15 @@ one form. **Make, Model, Year, ManualKey, and PDF** are required. An optional
 `skipPages` value excludes leading physical PDF pages before text extraction.
 
 The publication entry is hidden from non-admin profiles, and the API independently
-enforces the **SQL-backed Admin role**. A new catalog bike is inserted only after
-its PDF publication succeeds. Uploading the same make, model, year, and key
-replaces that manual's previous published content.
+enforces the **SQL-backed Admin role**. Submission validates the PDF and saves a
+durable publication job, returning **202 Accepted** and a job ID. A background
+worker performs embedding, publication, cleanup, and catalog saving outside the
+HTTP request. Only a **Succeeded** job means the manual and catalog update are
+complete; an accepted or fully staged job is not yet a successful publication.
+
+The Admin screen shows progress and recent jobs. It polls while visible and
+recovers saved job status when reopened. Uploading the same make, model, year,
+and key replaces that manual's previous published content.
 
 The service processes the PDF's text layer, not its diagrams or image pixels.
 It rejects empty, malformed, oversized, or image-only documents without usable
@@ -159,7 +165,8 @@ flowchart LR
     AGENT --> WEB["Tavily web search"]
     MANUAL --> EMBED["Gemini embeddings"]
     MANUAL --> QDRANT[("Qdrant")]
-    API -->|"Admin only"| UPLOAD["PDF publication"]
+    API -->|"Admin submission and status"| JOBS[("SQL publication jobs")]
+    JOBS --> UPLOAD["Background publication worker"]
     UPLOAD --> EMBED
     UPLOAD --> QDRANT
 ```
@@ -186,11 +193,28 @@ separate. Limiting context does not delete older SQL messages.
 ```text
 Validate PDF and skip count
     -> Extract text into approximately 300-word chunks
-    -> Generate embeddings and stage a new revision
+    -> Save bounded text and job metadata in SQL
+    -> Return 202 Accepted + job ID
+
+Background worker
+    -> Load a queued or interrupted job
+    -> Generate embeddings and stage its revision
+    -> Persist acknowledged chunk checkpoints
     -> Publish the revision by updating its manifest
     -> Remove older revisions belonging to the same ManualKey
-    -> Save or confirm the catalog bike
+    -> Save the catalog result and mark the job Succeeded
 ```
+
+`ManualPublicationJobs` stores only extracted text while a job is active, not the
+raw PDF or its images. The job ID determines the Qdrant revision and deterministic
+chunk IDs. After interruption, already acknowledged chunks are verified and
+processing continues from the saved checkpoint. A replayed upsert replaces the
+same point instead of creating a duplicate.
+
+Terminal jobs clear their temporary text and retain status, progress, and a
+safe error or catalog result. A failed job requires a new submission after the
+underlying issue is resolved. Already-staged points from older synchronous
+uploads are not automatically adopted as jobs.
 
 All manuals share one configured Qdrant collection. Within that collection:
 
@@ -211,8 +235,13 @@ targets older revisions of the same key, leaving other manuals untouched. If
 publication changes during an empty search result, the reader can retry the
 newer revision once.
 
-Uploads are serialized by a process-local gate and a SQL application lock for
-coordination between backend instances sharing the database.
+Publication is serialized by a process-local gate and a SQL application lock for
+coordination between backend instances sharing the database. An active-manual
+unique index prevents overlapping jobs for the same collection/key.
+
+The worker checks for interrupted jobs at startup and is signaled by submissions
+or active-job status reads. It does not continuously poll SQL when idle. Its
+shutdown token, not the original HTTP request token, controls execution.
 
 ## Reliability and operational controls
 
@@ -250,6 +279,8 @@ last-updated metadata.
 | PDF size | 20 MiB |
 | PDF pages | 1,000 |
 | Extracted chunks | 2,000 |
+| Temporary extracted text per job | 16 MiB serialized UTF-16 text |
+| Active publication jobs | 3 across the application database |
 | Leading pages skipped | 0; configurable from 0 to 999 |
 | Upload embedding request budget | 80 requests per rolling window |
 | Upload embedding token budget | 24,000 input tokens per rolling window |
@@ -262,13 +293,16 @@ when available and reports persistent quota exhaustion explicitly. This is
 separate from the chat request limiter and does not slow Qdrant writes directly.
 
 Normal Android API calls have a 45-second total timeout; chat calls allow
-120 seconds. The PDF client allows up to 10 minutes for publication, but hosting
-and reverse-proxy limits can end a request earlier.
+120 seconds. PDF submission allows up to 180 seconds for transfer and text/job
+preparation. The worker can process the accepted job independently of that
+request; progress is fetched through short status calls.
 
 ### Important boundaries
 
 - Local pacing and request limits do not increase provider quotas or account for every other application using the same provider project.
 - SQL and Qdrant publication are separate operations, not one distributed transaction. Failures are surfaced rather than reported as successful catalog creation.
+- The backend process must be running for background work to advance. Free/shared-tier idle unloading, restarts, or shutdowns can pause it; saved checkpoints enable recovery rather than guaranteeing continuous execution.
+- PDF transfer and text extraction remain request-bound. Provider quotas, hosting resource limits, and database availability still apply to background work.
 - A database commit and delivery of its HTTP response are separate events. A lost response can leave the client uncertain; chat sends are not automatically replayed.
 - Manual applicability depends on accurate catalog mappings and source documents. Model-generated guidance is not a substitute for a qualified mechanic or verified manufacturer procedures.
 
@@ -289,8 +323,10 @@ SQL user, not a supplied owner ID.
 | `GET` | `/api/chats` | Owner | List saved chats using `beforeId` and `beforeUpdatedAt` |
 | `GET` | `/api/chats/{id}` | Owner | Load messages using optional `beforeSequence` |
 | `DELETE` | `/api/chats/{id}` | Owner | Permanently delete a chat and its messages |
-| `POST` | `/api/admin/bikes` | Admin | Publish a required PDF and create or update its catalog entry |
-| `POST` | `/api/admin/bikes/{bikeId}/manual` | Admin | Replace the manual for an existing catalog bike |
+| `POST` | `/api/admin/bikes` | Admin | Submit a bike/PDF publication job; returns `202` |
+| `POST` | `/api/admin/bikes/{bikeId}/manual` | Admin | Submit a replacement job for an existing catalog bike; returns `202` |
+| `GET` | `/api/admin/manual-jobs` | Submitting Admin | Latest 20 publication jobs, excluding source text |
+| `GET` | `/api/admin/manual-jobs/{id}` | Submitting Admin | Job state, staged/total chunks, error, and result bike ID |
 
 **ID distinction:** catalog operations use `MasterBikes.Id`, garage operations
 use `UserBikes.Id`, and conversations use `ChatSessions.Id`.
@@ -368,7 +404,7 @@ configuration.
 
 The relational model separates application data in `RideFix` from catalog data
 in `RideFix_Customs`. Its core entities are users, roles, catalog bikes, garage
-bikes, chat sessions, and ordered messages. Database changes follow reviewed SQL
+bikes, chat sessions, ordered messages, and durable manual-publication jobs. Database changes follow reviewed SQL
 scripts and scaffolding rather than hand-editing generated entity files.
 
 ## Verification
@@ -376,10 +412,10 @@ scripts and scaffolding rather than hand-editing generated entity files.
 Backend regression coverage includes authentication and ownership, garage
 reactivation, first-turn save rollback, chat deletion, stable pagination,
 tool-call sequencing, preserved Gemini signatures, cancellation, input limits,
-Admin publication validation, and embedding-quota timing.
+Admin publication validation, checkpoint recovery, terminal job states, and embedding-quota timing.
 
 Android unit tests cover session transitions, account-switch isolation, chat
-selection, saved history, deletion, pagination, Admin form validation, and
+selection, saved history, deletion, pagination, Admin form validation, job polling/recovery, and
 request/response serialization. Instrumented Compose test sources cover garage
 and sidebar interactions.
 

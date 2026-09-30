@@ -29,11 +29,11 @@ object RideFixBroClient {
 
     val api: RideFixApiInterface by lazy { createApi(apiClient) }
     val chatApi: RideFixApiInterface by lazy { createApi(chatClient) }
-    // PDF publication may need many provider calls. Hosting/proxy limits can still end the request sooner.
+    // Only PDF upload/text preparation is HTTP-bound now; publication uses short status requests.
     private val uploadClient = apiClient.newBuilder()
         .writeTimeout(120, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.MINUTES)
-        .callTimeout(10, TimeUnit.MINUTES)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .callTimeout(180, TimeUnit.SECONDS)
         .build()
     val uploadApi: RideFixApiInterface by lazy { createApi(uploadClient) }
 

@@ -1,6 +1,6 @@
 ﻿using System.ComponentModel.DataAnnotations;
 
-namespace RideFixBro.API.Models
+namespace RideFixBro.API.Models.ManualPublishModels
 {
     public class ManualUploadRequest
     {
@@ -23,5 +23,4 @@ namespace RideFixBro.API.Models
         public string ManualKey { get; set; } = string.Empty;
     }
 
-    public record BikePublicationResponse(BikeResponse Bike, string ManualKey, int Chunks, int SkippedPages);
 }

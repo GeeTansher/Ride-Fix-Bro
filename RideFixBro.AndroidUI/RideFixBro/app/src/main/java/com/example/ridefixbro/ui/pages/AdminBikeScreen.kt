@@ -30,6 +30,10 @@ fun AdminBikeScreen(profile: UserProfileResponse, viewModel: AdminBikeViewModel,
         return
     }
     val state by viewModel.state.collectAsState()
+    DisposableEffect(profile.supabaseUserId, profile.role) {
+        viewModel.observeJobs(profile)
+        onDispose { viewModel.stopObserving() }
+    }
     val resolver = LocalContext.current.applicationContext.contentResolver
     val scope = rememberCoroutineScope()
     var confirm by remember { mutableStateOf(false) }
@@ -54,7 +58,7 @@ fun AdminBikeScreen(profile: UserProfileResponse, viewModel: AdminBikeViewModel,
             }
         }
     }
-    val editable = enabled && !state.loading
+    val editable = enabled && !state.busy
     val form = state.form
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -79,17 +83,39 @@ fun AdminBikeScreen(profile: UserProfileResponse, viewModel: AdminBikeViewModel,
         }
         state.pdfName?.let { Text(it) }
         Button(onClick = { confirm = true }, enabled = editable && form.isValid && state.pdfUri != null) {
-            Text("Publish official manual")
+            Text("Submit publication")
         }
         if (state.loading) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
-            Text("Uploading and processing the PDF. Wait for confirmation; large manuals can take time.")
+            Text("Uploading PDF and saving the publication job...")
         }
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        state.published?.let {
-            Text("Published ${it.bike.make} ${it.bike.model} (${it.bike.year}): ${it.chunks} chunks.",
-                color = MaterialTheme.colorScheme.primary)
-            Text("The bike is available in the catalog. Add it to your own garage separately.")
+        TextButton(onClick = viewModel::refreshJobs, enabled = enabled && !state.loading && !state.statusLoading) {
+            Text("Refresh jobs")
+        }
+        if (state.statusLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        state.job?.let { job ->
+            Text("${job.make} ${job.model} (${job.year}) - ${job.status}", style = MaterialTheme.typography.titleMedium)
+            Text("Job: ${job.id}", style = MaterialTheme.typography.bodySmall)
+            Text("${job.completedChunks} / ${job.totalChunks} chunks staged")
+            if (!job.finished) {
+                LinearProgressIndicator(progress = { job.completedChunks.toFloat() / job.totalChunks.coerceAtLeast(1) },
+                    modifier = Modifier.fillMaxWidth())
+                Text(if (job.completedChunks == job.totalChunks) "Finalizing manual publication and catalog..."
+                    else "Processing on the server. You can leave this screen and reopen it to check progress.")
+            }
+            if (job.succeeded)
+                Text("Publication complete. The bike is available in the catalog; add it to your garage separately.",
+                    color = MaterialTheme.colorScheme.primary)
+            job.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
+        if (state.jobs.isNotEmpty()) {
+            Text("Recent publication jobs", style = MaterialTheme.typography.titleSmall)
+            state.jobs.forEach { job ->
+                TextButton(onClick = { viewModel.openJob(job.id) }, enabled = !state.loading) {
+                    Text("${job.make} ${job.model} ${job.year}: ${job.status}")
+                }
+            }
         }
         Text("Official collection is configured on the backend using Qdrant_Vector_DB:ManualCollection.",
             style = MaterialTheme.typography.bodySmall)
@@ -104,7 +130,7 @@ fun AdminBikeScreen(profile: UserProfileResponse, viewModel: AdminBikeViewModel,
                 val file = state.pdfUri?.let { MultipartBody.Part.createFormData(
                     "file", state.pdfName ?: "manual.pdf", PdfRequestBody(resolver, Uri.parse(it))) }
                 viewModel.publish(profile, file)
-            }) { Text("Publish") }
+            }) { Text("Submit job") }
         },
         dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } }
     )

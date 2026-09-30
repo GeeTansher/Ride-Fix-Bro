@@ -7,12 +7,13 @@ using RideFixBro.API.Agents;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.DataStore;
 using RideFixBro.API.Services;
-using RideFixBro.API.Models;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using RideFixBro.API.Common;
+using RideFixBro.API.Models.ChatModels;
 
 namespace RideFixBro.API.Tests
 {

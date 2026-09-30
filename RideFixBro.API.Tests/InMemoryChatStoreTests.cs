@@ -1,6 +1,7 @@
 using AutoGen.Core;
-using RideFixBro.API.Services;
 using RideFixBro.API.Models;
+using RideFixBro.API.Common;
+using RideFixBro.API.Models.ChatModels;
 
 namespace RideFixBro.API.Tests;
 

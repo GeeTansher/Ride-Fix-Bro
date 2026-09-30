@@ -1,3 +1,4 @@
+using RideFixBro.API.Common;
 using RideFixBro.API.Configuration;
 using RideFixBro.API.Services;
 

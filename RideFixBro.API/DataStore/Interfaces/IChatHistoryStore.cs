@@ -1,5 +1,5 @@
 using AutoGen.Core;
-using RideFixBro.API.Models;
+using RideFixBro.API.Models.ChatModels;
 
 namespace RideFixBro.API.DataStore.Interfaces;
 

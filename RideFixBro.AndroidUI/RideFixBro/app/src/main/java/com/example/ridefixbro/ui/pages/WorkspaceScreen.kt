@@ -53,7 +53,7 @@ fun WorkspaceScreen(
     val enabled = authState.sessionReady && !authState.loading
 
     LaunchedEffect(garage.bikes) { chatViewModel.updateGarage(garage.bikes) }
-    LaunchedEffect(admin.published) { if (admin.published != null) garageViewModel.refresh() }
+    LaunchedEffect(admin.job?.id, admin.job?.status) { if (admin.job?.succeeded == true) garageViewModel.refresh() }
     LaunchedEffect(profile.role) { if (profile.role != "Admin" && page == WorkspacePage.Admin) page = WorkspacePage.Chat }
     fun navigate(next: WorkspacePage) {
         page = next

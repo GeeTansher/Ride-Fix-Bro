@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace RideFixBro.API.Models
+namespace RideFixBro.API.Models.GarageModels
 {
 	public class AddGarageBikeRequest
 	{

@@ -1,4 +1,4 @@
-namespace RideFixBro.API.Models;
+namespace RideFixBro.API.Models.ChatModels;
 
 // Backend context only: API responses use GarageBikeResponse/ChatSummary instead.
 public sealed record BikeContext(int UserBikeId, string Make, string Model, int Year, string? ManualKey);
