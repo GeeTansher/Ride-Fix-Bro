@@ -1,6 +1,7 @@
 package com.example.ridefixbro.auth
 
 import android.content.Context
+import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
@@ -16,6 +17,7 @@ import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.logging.LogLevel
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -66,18 +68,38 @@ class AuthRepository(context: Context) {
             .setNonce(hashNonce(rawNonce))
             .build()
         val request = GetCredentialRequest.Builder().addCredentialOption(googleOption).build()
-        val response = credentialManager.getCredential(activityContext, request)
-        val credential = response.credential
-        if (credential !is CustomCredential ||
-            credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-            throw LoginRequiredException("Google did not return an ID token.")
+        Log.d("RideFixAuth", "Requesting Google credential.")
+        val googleToken = try {
+            val response = credentialManager.getCredential(activityContext, request)
+            val credential = response.credential
+            if (credential !is CustomCredential ||
+                credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+                throw LoginRequiredException("Google did not return an ID token.")
+            }
+            GoogleIdTokenCredential.createFrom(credential.data).idToken
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
+            // Stage/type only: never log the token, account, nonce or provider response body.
+            Log.w("RideFixAuth", "Google credential failed (${error.javaClass.simpleName}).")
+            throw SignInStageException(SignInStage.Google, error)
         }
-        val googleToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
         // Google ko hashed nonce diya; Supabase ko original nonce verification ke liye.
-        supabase.auth.signInWith(IDToken) {
-            provider = Google
-            idToken = googleToken
-            nonce = rawNonce
+        Log.d("RideFixAuth", "Google credential received; starting Supabase exchange.")
+        try {
+            supabase.auth.signInWith(IDToken) {
+                provider = Google
+                idToken = googleToken
+                nonce = rawNonce
+            }
+            Log.d("RideFixAuth", "Supabase exchange completed.")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.w("RideFixAuth", "Supabase exchange failed (${error.javaClass.simpleName}).")
+            throw SignInStageException(SignInStage.Supabase, error)
         }
     }
 
@@ -122,6 +144,8 @@ class LoginRequiredException(message: String) : Exception(message)
 class SessionNotReadyException : IOException("Session refresh is pending. Check the connection and retry.")
 class AuthSetupException : Exception("Set the three public auth values in local.properties.")
 class RemoteSignOutException : IOException("Local logout completed, but remote cleanup could not be confirmed.")
+enum class SignInStage { Google, Supabase }
+class SignInStageException(val stage: SignInStage, cause: Exception) : Exception("Sign-in failed at $stage.", cause)
 
 @OptIn(kotlin.time.ExperimentalTime::class)
 internal fun requireAccessToken(status: SessionStatus, expectedUserId: String): String {

@@ -10,6 +10,8 @@ import com.example.ridefixbro.auth.AuthSetupException
 import com.example.ridefixbro.auth.LoginRequiredException
 import com.example.ridefixbro.auth.RemoteSignOutException
 import com.example.ridefixbro.auth.SessionNotReadyException
+import com.example.ridefixbro.auth.SignInStage
+import com.example.ridefixbro.auth.SignInStageException
 import com.example.ridefixbro.model.response.UserProfileResponse
 import com.example.ridefixbro.network.RideFixBroClient
 import com.example.ridefixbro.network.RideFixApiInterface
@@ -73,10 +75,19 @@ class AuthViewModel(
                         when (status) {
                             SessionStatus.Initializing -> {
                                 // App background mein gayi hai, logout nahi. Existing screen/profile rehne do.
-                                _state.value = _state.value.copy(loading = true, sessionReady = false, error = null)
+                                val previous = _state.value
+                                _state.value = previous.copy(
+                                    loading = previous.signedIn || previous.error == null || authJob?.isActive == true,
+                                    sessionReady = false
+                                )
                             }
                             is SessionStatus.NotAuthenticated -> {
-                                _state.value = AuthUiState(loading = authJob?.isActive == true)
+                                // Lifecycle/session invalidation must not erase the failure that caused this transition.
+                                val previous = _state.value
+                                val error = previous.error ?: if (previous.signedIn) {
+                                    "Session verify nahi ho paayi. Dobara Google se sign in kar."
+                                } else null
+                                _state.value = AuthUiState(loading = error == null && authJob?.isActive == true, error = error)
                             }
                             is SessionStatus.RefreshFailure -> {
                                 _state.value = _state.value.copy(
@@ -98,6 +109,7 @@ class AuthViewModel(
                                 } catch (error: CancellationException) {
                                     throw error
                                 } catch (error: Exception) {
+                                    currentCoroutineContext().ensureActive()
                                     showError(error)
                                 }
                             }
@@ -146,7 +158,13 @@ class AuthViewModel(
             // collectLatest purane account ki pending profile request cancel kar deta hai.
             _state.value = AuthUiState(loading = false, signedIn = true, sessionReady = true, profile = profile)
         } catch (error: HttpException) {
-            if (error.code() == 401) auth.invalidateSession(userId, token)
+            currentCoroutineContext().ensureActive()
+            if (signingOut) return
+            if (error.code() == 401) {
+                // clearSession emits NotAuthenticated and can cancel this collectLatest block.
+                showError(error)
+                auth.invalidateSession(userId, token)
+            }
             throw error
         }
     }
@@ -160,6 +178,7 @@ class AuthViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                currentCoroutineContext().ensureActive()
                 showError(error)
             }
         }
@@ -167,13 +186,21 @@ class AuthViewModel(
 
     private fun showError(error: Exception) {
         val message = when (error) {
-            is GetCredentialCancellationException -> null
+            is GetCredentialCancellationException ->
+                "Google credential step complete nahi hua (GetCredentialCancellationException). Dobara account select kar."
+            is SignInStageException -> {
+                val type = error.cause?.javaClass?.simpleName ?: "UnknownError"
+                when (error.stage) {
+                    SignInStage.Google -> "Google credential step fail hua ($type). Account select karne ke baad bhi aaye toh Google sign-in configuration/Play Services check kar."
+                    SignInStage.Supabase -> "Google credential mil gayi, lekin Supabase sign-in fail hua ($type). Supabase Auth logs aur network check kar."
+                }
+            }
             is AuthSetupException -> "Auth setup missing hai: local.properties mein SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY aur GOOGLE_WEB_CLIENT_ID set kar."
             is NoCredentialException -> "Google account select nahi hua. Device ka Google account aur Play Services check kar."
             is LoginRequiredException -> "Session expire ho gaya. Google se dobara sign in kar."
             is SessionNotReadyException -> "Session restore/refresh chal raha hai. Internet check karke retry kar."
             is InterruptedIOException -> "Request 45 seconds mein complete nahi hui. Dobara try kar."
-            is HttpException -> "API account verify nahi kar paayi (${error.code()}). Retry kar."
+            is HttpException -> "Backend profile fetching api account verify nahi kar paayi (${error.code()}). Dobara sign in ya account connection retry kar."
             else -> "Sign-in complete nahi hua. Network/configuration check karke retry kar."
         }
         _state.value = _state.value.copy(loading = false, sessionReady = false, error = message)

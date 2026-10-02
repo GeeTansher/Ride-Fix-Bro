@@ -62,6 +62,12 @@ stored outside the app's backup files. Token guards reject expired or
 wrong-account sessions. Account-switch and cancellation checks prevent delayed
 responses from populating another user's workspace.
 
+Sign-in failures distinguish Google credential retrieval, the Supabase token
+exchange, and the backend profile lookup. Errors remain visible across session
+initialization and invalidation instead of silently returning to the sign-in
+button. The `RideFixAuth` Android log tag records stage and exception type only,
+not tokens, account details, nonces, or provider response bodies.
+
 ### Personal garage
 
 Riders choose from dependent **Make -> Model -> Year** dropdowns backed by the

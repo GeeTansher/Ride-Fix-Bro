@@ -1,11 +1,15 @@
 package com.example.ridefixbro
 
+import android.content.Context
+import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import com.example.ridefixbro.auth.AuthRepository
 import com.example.ridefixbro.auth.LoginRequiredException
 import com.example.ridefixbro.auth.SessionNotReadyException
+import com.example.ridefixbro.auth.SignInStage
+import com.example.ridefixbro.auth.SignInStageException
 import com.example.ridefixbro.auth.requireAccessToken
 import com.example.ridefixbro.auth.shouldInvalidateSession
 import com.example.ridefixbro.model.response.ChatResponse
@@ -103,6 +107,101 @@ class SessionLifecycleTest {
         runCurrent()
         coVerify(exactly = 1) { api.me(any()) }
         coVerify(exactly = 1) { auth.accessToken("user-a") }
+    }
+
+    @Test
+    fun credentialCancellationIsVisibleInsteadOfSilentlyReturningToSignIn() = runTest(dispatcher) {
+        val context = mockk<Context>()
+        coEvery { auth.signIn(context) } throws GetCredentialCancellationException("Synthetic cancellation")
+        val model = keep(AuthViewModel(auth, api))
+        statuses.value = SessionStatus.NotAuthenticated()
+        runCurrent()
+        model.signIn(context)
+        runCurrent()
+        assertFalse(model.state.value.loading)
+        assertFalse(model.state.value.signedIn)
+        assertNotNull(model.state.value.error)
+        assertTrue(model.state.value.error!!.contains("Google"))
+        coVerify(exactly = 0) { api.me(any()) }
+    }
+
+    @Test
+    fun lateSdkUnauthenticatedStateDoesNotEraseASignInFailure() = runTest(dispatcher) {
+        val context = mockk<Context>()
+        coEvery { auth.signIn(context) } throws IOException("Private provider message")
+        val model = keep(AuthViewModel(auth, api))
+        statuses.value = SessionStatus.NotAuthenticated()
+        runCurrent()
+        model.signIn(context)
+        runCurrent()
+        val error = model.state.value.error
+        assertNotNull(error)
+        statuses.value = SessionStatus.Initializing
+        runCurrent()
+        statuses.value = SessionStatus.NotAuthenticated()
+        runCurrent()
+        assertEquals(error, model.state.value.error)
+        assertFalse(model.state.value.loading)
+        assertFalse(model.state.value.signedIn)
+    }
+
+    @Test
+    fun backend401KeepsTheFailureVisibleAfterSdkSessionInvalidation() = runTest(dispatcher) {
+        coEvery { api.me(any()) } throws HttpException(Response.error<UserProfileResponse>(401,
+            "{}".toResponseBody("application/json".toMediaType())))
+        coEvery { auth.invalidateSession("user-a", any()) } coAnswers {
+            statuses.value = SessionStatus.NotAuthenticated(true)
+        }
+        val model = keep(AuthViewModel(auth, api))
+        statuses.value = authenticated("user-a")
+        runCurrent()
+        assertFalse(model.state.value.loading)
+        assertFalse(model.state.value.signedIn)
+        assertNull(model.state.value.profile)
+        assertTrue(model.state.value.error?.contains("401") == true)
+    }
+
+    @Test
+    fun supabaseExchangeFailureIsIdentifiedWithoutExposingProviderDetails() = runTest(dispatcher) {
+        val context = mockk<Context>()
+        coEvery { auth.signIn(context) } throws SignInStageException(
+            SignInStage.Supabase, IOException("private-token-must-not-appear"))
+        val model = keep(AuthViewModel(auth, api))
+        statuses.value = SessionStatus.NotAuthenticated()
+        runCurrent()
+        model.signIn(context)
+        runCurrent()
+        assertTrue(model.state.value.error!!.contains("Supabase"))
+        assertTrue(model.state.value.error!!.contains("IOException"))
+        assertFalse(model.state.value.error!!.contains("private-token"))
+        assertFalse(model.state.value.loading)
+        coVerify(exactly = 0) { api.me(any()) }
+    }
+
+    @Test
+    fun aNewSignInAttemptClearsThePreviousFailureAndCanReachTheProfile() = runTest(dispatcher) {
+        val context = mockk<Context>()
+        coEvery { auth.signIn(context) } throws GetCredentialCancellationException("Cancelled")
+        val model = keep(AuthViewModel(auth, api))
+        statuses.value = SessionStatus.NotAuthenticated()
+        runCurrent()
+        model.signIn(context)
+        runCurrent()
+        assertNotNull(model.state.value.error)
+        val complete = CompletableDeferred<Unit>()
+        coEvery { auth.signIn(context) } coAnswers {
+            complete.await()
+            statuses.value = authenticated("user-a")
+        }
+        model.signIn(context)
+        runCurrent()
+        assertTrue(model.state.value.loading)
+        assertNull(model.state.value.error)
+        complete.complete(Unit)
+        runCurrent()
+        assertTrue(model.state.value.sessionReady)
+        assertEquals("user-a", model.state.value.profile?.supabaseUserId)
+        assertNull(model.state.value.error)
     }
 
     @Test
